@@ -1,0 +1,17 @@
+/.build/
+/dist/
+/runtime/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+*.log
+*.sqlite*
+*.jsonl
+.env
+auth.json
+credentials.json
+/local-evidence/
+Thumbs.db
+.DS_Store

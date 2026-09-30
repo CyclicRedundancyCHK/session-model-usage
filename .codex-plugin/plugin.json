@@ -1,0 +1,25 @@
+{
+  "name": "session-model-usage",
+  "version": "0.1.1",
+  "description": "本地统计 Codex 会话和子智能体按模型、推理强度的 token 用量，并提供 Windows 悬浮条。",
+  "author": {
+    "name": "CyclicRedundancyCHK"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "会话模型用量",
+    "shortDescription": "查看各模型和推理强度的会话 token 用量。",
+    "longDescription": "只读本地会话记录，汇总主会话和子智能体。用量条放在输入栏权限与背景信息控件之间，点击展开模型与推理强度卡片，支持深浅主题。首次自动跟随需通过专用启动器打开 Codex。",
+    "developerName": "CyclicRedundancyCHK",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "查看这个会话各模型用了多少 token。",
+      "启动会话用量悬浮条。",
+      "停止会话用量悬浮条。"
+    ]
+  }
+}

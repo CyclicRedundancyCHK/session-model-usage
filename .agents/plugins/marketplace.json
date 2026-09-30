@@ -1,0 +1,20 @@
+{
+  "name": "session-model-usage",
+  "interface": {
+    "displayName": "Codex 会话模型用量"
+  },
+  "plugins": [
+    {
+      "name": "session-model-usage",
+      "source": {
+        "source": "local",
+        "path": "."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
