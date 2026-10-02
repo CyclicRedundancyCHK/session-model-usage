@@ -51,7 +51,7 @@ class UpgradeTests(unittest.TestCase):
         self.assertEqual((self.destination/'runtime/session-usage.exe').read_bytes(),b'0.1.2')
         self.assertEqual((Path(result['backup'])/'original.txt').read_text(),'preserve existing installation')
         self.assertTrue(any(c.args[1:]==('plugin','add','session-model-usage@personal','--json') for c in cli.call_args_list))
-        stop.assert_called_once_with(self.destination)
+        stop.assert_called_once_with(self.destination.resolve())
     def test_registration_failure_restores_original_files(self):
         self.register_fail=True
         with self.assertRaisesRegex(RuntimeError,'已恢复原安装'):
