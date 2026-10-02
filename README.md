@@ -6,12 +6,12 @@ Windows 上的 Codex 会话用量插件与伴随悬浮条。只读本机日志�
 
 ## 安装
 
-1. 从 [Releases](https://github.com/CyclicRedundancyCHK/session-model-usage/releases) 下载 `session-model-usage-v0.1.1-windows-x64.zip`。
+1. 从 [Releases](https://github.com/CyclicRedundancyCHK/session-model-usage/releases) 下载 `session-model-usage-v0.1.2-windows-x64.zip`。
 2. 完整解压，保留 `runtime` 及其 `_internal` 文件夹。无需安装 Python。
 3. 双击 `安装插件.cmd`，再从 Windows 开始菜单打开 **Codex 会话用量**。
 4. 如果 Codex 已通过普通方式启动，启动器会在托盘等待。保存工作并手动完全退出 Codex 后，它会自动用正确参数重新打开。
 
-安装位置为 `%USERPROFILE%\plugins\session-model-usage`，通过 Codex CLI 注册本项目独立的插件市场，不修改其他插件的市场文件。已有同名目录时保留它并停止覆盖；已有用户应先退出悬浮条并备份旧目录，再安装新版。
+安装位置为 `%USERPROFILE%\plugins\session-model-usage`，通过 Codex CLI 注册本项目独立的插件市场，不修改其他插件的市场文件。已有用户双击安装脚本会自动升级：先备份、只停止本插件、保留原市场和快捷方式，注册失败时回滚。备份保留在个人插件目录的 `.session-model-usage-backups` 中。
 
 首次安装后，插件技能在新的 Codex 会话中加载。也可直接打开 `runtime/CodexSessionUsage.exe` 启动伴随程序。
 
@@ -27,6 +27,8 @@ Windows 上的 Codex 会话用量插件与伴随悬浮条。只读本机日志�
 
 ![浅色用量详情](assets/preview-light.png)
 
+独立托盘管理进程在 Codex 关闭后保持待机，不自行重开。再次打开 Codex 后重新连接；悬浮条异常退出或心跳停止时自动恢复。一分钟内五次失败会暂停，并提供“恢复连接”。临时连接错误按 1、2、4、8、15 秒重试。
+
 程序每 250 毫秒检查会话和位置，每秒增量刷新用量。只读取本机的会话索引和日志；调试连接验证为 Codex 自身在回环地址监听。没有开机自启。
 
 ## 命令
@@ -38,10 +40,12 @@ Windows 上的 Codex 会话用量插件与伴随悬浮条。只读本机日志�
 .\runtime\session-usage.exe query --thread-id '<会话 UUID>'
 .\runtime\session-usage.exe query --thread-id '<会话 UUID>' --no-descendants
 .\runtime\session-usage.exe status
+.\runtime\session-usage.exe diagnose
+.\runtime\session-usage.exe --version
 .\runtime\session-usage.exe stop
 ```
 
-`query` 返回 JSON，默认使用 `CODEX_THREAD_ID` 或正在跟随的会话。`--codex-home <目录>` 可指定日志目录。`stop` 退出悬浮条或取消恢复等待，Codex 继续运行。
+`query` 返回 JSON，默认使用 `CODEX_THREAD_ID` 或正在跟随的会话。`--codex-home <目录>` 可指定日志目录。`stop` 退出管理进程和悬浮条并取消恢复，Codex 继续运行。`status.running` 表示管理进程运行，待机时 `overlay_visible=false`；`healthy` 表示心跳新鲜；`supervisor_pid` 和 `worker_pid` 分别表示管理进程与实际悬浮条子进程。`overlay_pid` 兼容旧缓存，待机时可能指向管理进程。`diagnose` 只读取本地轮转诊断，不上传日志。
 
 `complete` 表示现有记录可以完成统计，`partial` 表示存在证据缺口，`pending` 和 `totals: null` 表示尚无用量记录。`reasoning_effort: null` 表示没有记录，`none` 表示明确关闭推理。
 
@@ -61,7 +65,7 @@ $env:PYTHONPATH = 'source'
 
 ## 兼容范围
 
-已在 Codex Windows 安装包 `26.924.2738.0` 与 `26.928.1915.0` 验证会话识别与输入栏位置，并验证新版恢复流程。使用了内部界面标识和只读路由，后续 Codex 更新可能需要适配。
+已在 Codex Windows 安装包 `26.924.2738.0` 、`26.928.1915.0` 与 `26.930.2377.0` 验证会话识别与输入栏位置，并验证新版恢复流程。使用了内部界面标识和只读路由，后续 Codex 更新可能需要适配。
 
 首版支持本机 Codex 会话。云端、ChatGPT Work 和远程主机会话暂不支持。跨物理屏幕的混合 DPI、两个真实会话窗口同时运行仍待完整实机验收，详见 [验证说明](docs/verification.md)。
 

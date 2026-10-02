@@ -21,18 +21,13 @@ def state_directory() -> Path:
 
 
 def read_state(directory: Path | None = None) -> dict:
-    try:
-        return json.loads(((directory or state_directory()) / "runtime.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    from .runtime_io import read_json
+    return read_json((directory or state_directory()) / "runtime.json")
 
 
-def write_state(value: dict, directory: Path | None = None) -> None:
-    folder = directory or state_directory()
-    folder.mkdir(parents=True, exist_ok=True)
-    temporary = folder / f"runtime.{os.getpid()}.tmp"
-    temporary.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
-    os.replace(temporary, folder / "runtime.json")
+def write_state(value: dict, directory: Path | None = None) -> bool:
+    from .runtime_io import atomic_json
+    return atomic_json((directory or state_directory()) / "runtime.json", value)
 
 
 def alive(pid: int | None, created: float | None) -> bool:

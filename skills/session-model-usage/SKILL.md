@@ -8,8 +8,9 @@ description: 查询 Codex 当前会话及其子智能体按模型和推理强度
 此插件的 Windows 程序与查询入口共用统计核心。插件根目录是本文件上方的 `../..`，运行根目录内的 `scripts/session-usage.ps1`。
 
 - 查询当前会话：`& '<插件根目录>/scripts/session-usage.ps1' -Action query`。脚本使用 `CODEX_THREAD_ID`，可通过 `-ThreadId '<会话 UUID>'` 指定其他会话；`-MainOnly` 只统计主会话。
-- 启动悬浮条：使用 `-Action launch`。如果返回 `waiting_for_restart`，说明当前 Codex 未启用本机调试连接，启动器已在托盘等待；用户保存工作并手动退出 Codex 后，它会自动重新打开当前安装版本并恢复悬浮条，无需再点击启动器。`restart_required` 表示多个实例等情况，需要手动退出后再使用启动器。不要强制结束应用或正在运行的任务。
-- 查看悬浮条状态：使用 `-Action status`。
+- 启动悬浮条：使用 `-Action launch`。如果返回 `waiting_for_restart`，说明当前 Codex 未启用本机调试连接，启动器已在托盘等待；用户保存工作并手动退出 Codex 后，它会自动重新打开当前安装版本并恢复悬浮条，无需再点击启动器。`ambiguous_host` 表示多个主进程，程序等待唯一实例，不猜测会话。管理进程在 Codex 关闭后保留待机。不要强制结束应用或正在运行的任务。
+- 查看悬浮条状态：使用 `-Action status`。`running` 表示管理进程运行，待机时 `overlay_visible=false`；`healthy` 表示心跳新鲜。
+- 诊断异常：使用 `-Action diagnose`，只读本地近期事件；没有自动上传。`recovery_paused` 表示一分钟内五次恢复失败，可点击托盘“恢复连接”或再次 launch。
 - 关闭悬浮条：使用 `-Action stop`，这不会关闭 Codex。
 
 查询返回 JSON：`totals` 为总量，`models` 为每个模型及主会话/子智能体分项；各模型的 `reasoning_efforts` 按实际推理强度分组，同组也含 `totals`、`main`、`subagents`。`reasoning_effort: null` 表示未记录，字符串 `none` 表示明确关闭推理。不要用当前模型选择或推理强度填补历史缺失。`threads` 为来源，`warnings` 为证据缺口。`pending` 与空 `totals` 表示还没有用量记录，不能解释为零。`partial` 表示统计不完整，回答时保留这一限制。

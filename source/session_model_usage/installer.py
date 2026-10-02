@@ -5,8 +5,13 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
+import uuid
+
+import psutil
 
 from .platform_win import find_app, hidden_startup
+from .diagnostics import record
 
 
 def write_local_marketplace(root: Path) -> Path:
@@ -39,6 +44,8 @@ def find_cli() -> str:
 def install(source: Path) -> dict:
     source = source.resolve()
     home = Path.home().resolve()
+    if (home / 'plugins/session-model-usage').is_symlink():
+        raise RuntimeError('升级目标是链接，未覆盖文件')
     destination = (home / "plugins/session-model-usage").resolve()
     if not destination.is_relative_to(home):
         raise RuntimeError("个人插件目标经解析后不在当前用户目录内")
@@ -65,13 +72,13 @@ def install(source: Path) -> dict:
                 shutil.copy2(source / name, destination / name)
     write_local_marketplace(destination)
     registered = subprocess.run([cli, "plugin", "marketplace", "add", str(destination), "--json"],
-        capture_output=True, encoding="utf-8", errors="replace", timeout=120, startupinfo=hidden_startup())
+        capture_output=True, encoding="utf-8", errors="replace", timeout=120, startupinfo=hidden_startup(), cwd=home)
     if registered.returncode:
         raise RuntimeError(f"注册本插件市场失败，已保留安装目录：{registered.stderr.strip()[:400]}")
     name = "session-model-usage"
     result = subprocess.run([cli, "plugin", "add", f"session-model-usage@{name}"],
                             capture_output=True, encoding="utf-8", errors="replace", timeout=120,
-                            startupinfo=hidden_startup())
+                            startupinfo=hidden_startup(), cwd=home)
     if result.returncode:
         raise RuntimeError(f"Codex 插件安装失败，已保留个人插件目录：{result.stderr.strip()[:400]}")
     menu = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs"
@@ -89,3 +96,123 @@ def install(source: Path) -> dict:
     return {"status": "installed", "plugin": "session-model-usage", "marketplace": name,
             "source_path": str(destination), "shortcut": str(shortcut) if not linked.returncode else None,
             "message": "已安装。首次使用请手动退出普通 Codex，再从开始菜单打开“Codex 会话用量”。插件技能在新会话中加载。"}
+
+
+def cli_json(cli, *arguments):
+    result = subprocess.run([cli, *arguments], capture_output=True, encoding='utf-8',
+                            errors='replace', timeout=120, startupinfo=hidden_startup(), cwd=Path.home())
+    if result.returncode:
+        raise RuntimeError('Codex 插件注册操作失败，已保留原版本')
+    return json.loads(result.stdout)
+
+
+def stop_installed(destination: Path):
+    helper = destination / 'runtime/session-usage.exe'
+    def command(action):
+        result = subprocess.run([str(helper), action], capture_output=True, encoding='utf-8',
+                                timeout=15, startupinfo=hidden_startup())
+        return json.loads(result.stdout)
+    before = command('status')
+    if not before.get('running'):
+        return
+    command('stop')
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        if not command('status').get('running'):
+            return
+        time.sleep(0.2)
+    expected = (destination / 'runtime/CodexSessionUsage.exe').resolve()
+    for pid_key, created_key in (('overlay_pid', 'overlay_created'), ('supervisor_pid', 'supervisor_created')):
+        try:
+            process = psutil.Process(before[pid_key])
+            if abs(process.create_time() - before[created_key]) >= 0.1 or Path(process.exe()).resolve() != expected:
+                raise RuntimeError('插件进程身份不匹配，未停止任何未知程序')
+            process.terminate()
+            process.wait(5)
+        except (KeyError, psutil.NoSuchProcess):
+            continue
+    if command('status').get('running'):
+        raise RuntimeError('插件仍在运行，未更改安装文件')
+
+
+def copy_release(source: Path, target: Path):
+    target.mkdir()
+    for component in ('.codex-plugin', '.agents', 'skills', 'scripts', 'runtime', 'source', 'assets', 'docs', 'licenses'):
+        item = source / component
+        if item.exists():
+            if item.is_symlink() or any(p.is_symlink() for p in item.rglob('*')):
+                raise RuntimeError('安装包包含链接，已拒绝升级')
+            shutil.copytree(item, target / component)
+    for name in ('README.md', 'LICENSE', 'CHANGELOG.md', 'THIRD_PARTY_NOTICES.md', 'Install.ps1', '安装插件.cmd', '启动悬浮条.cmd'):
+        if (source / name).is_file():
+            shutil.copy2(source / name, target / name)
+
+
+def upgrade(source: Path) -> dict:
+    source = source.resolve()
+    home = Path.home().resolve()
+    if (home / 'plugins/session-model-usage').is_symlink():
+        raise RuntimeError('升级目标是链接，未覆盖文件')
+    destination = (home / 'plugins/session-model-usage').resolve()
+    if destination.parent != (home / 'plugins').resolve() or destination.is_symlink():
+        raise RuntimeError('升级目标不在个人插件目录')
+    for relative in ('.codex-plugin/plugin.json', 'runtime/session-usage.exe', 'runtime/CodexSessionUsage.exe'):
+        if not (source / relative).is_file():
+            raise RuntimeError('升级包缺少程序或插件清单')
+    manifest = json.loads((source / '.codex-plugin/plugin.json').read_text(encoding='utf-8'))
+    if manifest.get('name') != 'session-model-usage' or source == destination:
+        raise RuntimeError('升级包来源不正确')
+    if not destination.is_dir():
+        return install(source)
+    old_manifest = json.loads((destination / '.codex-plugin/plugin.json').read_text(encoding='utf-8'))
+    if old_manifest.get('name') != 'session-model-usage':
+        raise RuntimeError('目标不是本产品，未覆盖文件')
+    cli = find_cli()
+    installed = [p for p in cli_json(cli, 'plugin', 'list', '--json').get('installed', [])
+                 if p.get('name') == 'session-model-usage']
+    if len(installed) != 1:
+        raise RuntimeError('无法唯一确定现有插件市场，未执行升级')
+    entry = installed[0]
+    if Path(entry.get('source', {}).get('path', '')).resolve() != destination:
+        raise RuntimeError('已注册插件目录与升级目标不一致')
+    selector = entry['pluginId']
+    backup_root = destination.parent / '.session-model-usage-backups'
+    backup_root.mkdir(exist_ok=True)
+    if backup_root.resolve().parent != destination.parent:
+        raise RuntimeError('备份目录不在个人插件目录')
+    token = str(int(time.time())) + '-' + uuid.uuid4().hex[:8]
+    backup = backup_root / token
+    staged = backup_root / (token + '-new')
+    failed = backup_root / (token + '-failed')
+    # Prepare and verify before touching the running installation.
+    copy_release(source, staged)
+    checked = subprocess.run([str(staged / 'runtime/session-usage.exe'), '--version'],
+                             capture_output=True, text=True, timeout=15, startupinfo=hidden_startup())
+    if checked.returncode or checked.stdout.strip() != manifest.get('version'):
+        raise RuntimeError('升级程序版本与清单不一致，原安装未改变')
+    stop_installed(destination)
+    destination.rename(backup)
+    try:
+        staged.rename(destination)
+        if entry['marketplaceName'] == 'session-model-usage':
+            write_local_marketplace(destination)
+        cli_json(cli, 'plugin', 'add', selector, '--json')
+        current = cli_json(cli, 'plugin', 'list', '--json').get('installed', [])
+        if not any(p.get('pluginId') == selector and p.get('version') == manifest['version'] for p in current):
+            raise RuntimeError('新插件缓存未生效')
+        if not entry.get('enabled', True):
+            raise RuntimeError('原插件已禁用，升级已回滚以保留设置')
+    except Exception as error:
+        if destination.exists():
+            destination.rename(failed)
+        backup.rename(destination)
+        try:
+            cli_json(cli, 'plugin', 'add', selector, '--json')
+        except Exception:
+            record('upgrade_registration_rollback_failed')
+        record('upgrade_rolled_back', error)
+        raise RuntimeError('升级失败，已恢复原安装文件') from error
+    record('upgrade_completed', version=manifest['version'])
+    return {'status': 'upgraded', 'version': manifest['version'], 'marketplace': entry['marketplaceName'],
+            'backup': str(backup), 'source_path': str(destination), 'codex_interrupted': False,
+            'message': '已升级并保留快捷方式。打开现有启动器恢复悬浮条。'}

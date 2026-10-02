@@ -9,11 +9,15 @@ import sys
 
 from session_model_usage.accounting import UsageService
 from session_model_usage.controller import RestartRequired, launch, status, stop
+from session_model_usage import __version__
+from session_model_usage.diagnostics import install_hooks, record
 
 
 def main() -> int:
+    install_hooks()
     gui = getattr(sys, "frozen", False) and Path(sys.executable).stem.lower() == "codexsessionusage"
     parser = argparse.ArgumentParser(description="Codex 会话模型用量 · 本机只读统计")
+    parser.add_argument('--version', action='version', version=__version__)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("launch", help="启动 Codex 和悬浮条；已有普通实例时提示手动退出")
     query = sub.add_parser("query", help="查询会话用量 JSON")
@@ -22,12 +26,19 @@ def main() -> int:
     query.add_argument("--no-descendants", action="store_true")
     sub.add_parser("status", help="查询悬浮条状态")
     sub.add_parser("stop", help="关闭悬浮条，不关闭 Codex")
+    sub.add_parser("diagnose", help="查看本地健康状态和近期诊断事件")
     install = sub.add_parser("install", help="注册个人插件并创建开始菜单快捷方式")
     install.add_argument("--source-root", type=Path, required=True)
+    upgrade = sub.add_parser("upgrade", help="备份并升级已安装插件，失败时回滚")
+    upgrade.add_argument("--source-root", type=Path, required=True)
     overlay = sub.add_parser("overlay", help=argparse.SUPPRESS)
     overlay.add_argument("--port", type=int, required=True)
     overlay.add_argument("--app-pid", type=int, required=True)
     overlay.add_argument("--run-id", required=True)
+    overlay.add_argument("--attachment-id")
+    supervise = sub.add_parser("supervise", help=argparse.SUPPRESS)
+    supervise.add_argument("--run-id", required=True)
+    supervise.add_argument("--open", action="store_true")
     recovery = sub.add_parser("recovery", help=argparse.SUPPRESS)
     recovery.add_argument("--run-id", required=True)
     preview = sub.add_parser("preview", help="使用示例数据生成界面预览")
@@ -49,12 +60,21 @@ def main() -> int:
             result = status()
         elif command == "stop":
             result = stop()
+        elif command == "diagnose":
+            from session_model_usage.diagnostics import diagnose
+            result = diagnose()
         elif command == "install":
             from session_model_usage.installer import install as register
             result = register(args.source_root)
+        elif command == "upgrade":
+            from session_model_usage.installer import upgrade as update
+            result = update(args.source_root)
         elif command == "overlay":
             from session_model_usage.overlay import run_overlay
-            return run_overlay(args.port, args.app_pid, args.run_id)
+            return run_overlay(args.port, args.app_pid, args.run_id, args.attachment_id)
+        elif command == "supervise":
+            from session_model_usage.supervisor import run_supervisor
+            return run_supervisor(args.run_id, args.open)
         elif command == "recovery":
             from session_model_usage.recovery import run_recovery
             return run_recovery(args.run_id)
@@ -68,6 +88,7 @@ def main() -> int:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except Exception as error:
+        record('command_failed', error, command=command)
         result = {"status": "restart_required" if isinstance(error, RestartRequired) else "error", "message": str(error)}
         if sys.stdout is not None:
             print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet('query','launch','status','stop')]
+    [ValidateSet('query','launch','status','stop','diagnose')]
     [string]$Action = 'query',
     [string]$ThreadId = $env:CODEX_THREAD_ID,
     [switch]$MainOnly

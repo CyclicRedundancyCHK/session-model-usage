@@ -130,12 +130,14 @@ class Inspector:
         self.last_discovery = 0.0
         self.browser: CDPConnection | None = None
         self.problem = "正在识别 Codex 界面"
+        self.connection_failed = False
 
     def get_json(self, path: str) -> dict | list:
         with self.opener.open(f"http://127.0.0.1:{self.port}{path}", timeout=0.8) as response:
             return json.load(response)
 
     def observe(self) -> list[Observation]:
+        self.connection_failed = False
         now = time.monotonic()
         if now - self.last_discovery >= 1:
             targets = self.get_json("/json/list")
@@ -168,6 +170,7 @@ class Inspector:
                     continue
                 result.append(Observation(key, data, self._bounds(key)))
             except Exception as error:
+                self.connection_failed = True
                 self.problem = f"无法读取界面调试目标：{type(error).__name__}"
                 connection = self.connections.pop(key, None)
                 if connection:
@@ -181,6 +184,9 @@ class Inspector:
                 self.browser = CDPConnection(version["webSocketDebuggerUrl"], self.port)
             return self.browser.call("Browser.getWindowForTarget", {"targetId": target_id}).get("bounds")
         except Exception:
+            if self.browser is not None:
+                self.browser.close()
+                self.browser = None
             return None
 
     def close(self) -> None:

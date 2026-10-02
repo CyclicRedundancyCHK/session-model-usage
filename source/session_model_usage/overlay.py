@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import threading
 import time
+from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 
 import psutil
@@ -15,6 +16,8 @@ from PySide6.QtWidgets import (QApplication, QFrame, QLabel, QMenu, QPushButton,
     QVBoxLayout, QHBoxLayout, QWidget, QSizePolicy)
 
 from .accounting import UsageService
+from .diagnostics import record
+from .runtime_io import atomic_json
 from .cdp import (Inspector, anchor_physical, bind_window, compact_tokens,
                   details_rectangle, toolbar_gap_physical)
 from .platform_win import (alive, client_geometry, foreground_info, position_without_focus,
@@ -361,26 +364,51 @@ class Observer(QThread):
     snapshot = Signal(object)
     state_changed = Signal(str)
 
-    def __init__(self, port: int, app_pid: int, run_id: str):
+    def __init__(self, port: int, app_pid: int, run_id: str, attachment_id: str | None = None):
         super().__init__()
         self.port, self.app_pid, self.run_id = port, app_pid, run_id
+        self.attachment_id = attachment_id
         self.stop_event = threading.Event()
         self.last_target = None
         self.last_hwnd = 0
         self.placement = {"visible": False, "thread_id": None, "message": ""}
 
+    def report(self, state):
+        state.update(heartbeat=time.time(), heartbeat_monotonic=time.monotonic(),
+                     run_id=self.run_id, attachment_id=self.attachment_id)
+        if self.attachment_id:
+            atomic_json(state_directory() / f'observer-{self.attachment_id}.json', state)
+        else:
+            write_state(state)
+
     def run(self) -> None:
-        inspector, service = Inspector(self.port), UsageService()
-        app = psutil.Process(self.app_pid)
-        app_created = app.create_time()
+        inspector = pool = None
+        state = {"status": "starting", "message": "正在连接", "thread_id": None,
+                 "overlay_visible": False, "badge_rect": None}
+        try:
+            inspector, service = Inspector(self.port), UsageService()
+            app = psutil.Process(self.app_pid)
+            app_created = app.create_time()
+            self.observe_loop(inspector, service, app_created, state)
+        except Exception as error:
+            record('observer_failed', error)
+            state.update(last_error=type(error).__name__)
+        finally:
+            if inspector is not None:
+                inspector.close()
+            state.update(status="stopped", message="悬浮条观察已停止", thread_id=None,
+                         overlay_visible=False, badge_rect=None)
+            self.report(state)
+
+    def observe_loop(self, inspector, service, app_created, state):
         own_pid = os.getpid()
-        state = read_state()
         state.update(overlay_pid=own_pid, overlay_created=psutil.Process(own_pid).create_time())
         last_usage, last_thread, last_write = 0.0, None, 0.0
         family = {self.app_pid}
         last_message = ""
         pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-token-reader")
         pending = None
+        next_connect, connection_attempt = 0.0, 0
         try:
             while not self.stop_event.is_set() and alive(self.app_pid, app_created):
                 start = time.monotonic()
@@ -400,7 +428,14 @@ class Observer(QThread):
                     # their windows must never become a conversation's host.
                     hwnd, pid = foreground_info()
                     state.update(foreground_pid=pid)
+                    if start < next_connect:
+                        self.report(state)
+                        self.stop_event.wait(min(0.5, next_connect - start))
+                        continue
                     observations = inspector.observe()
+                    if not observations and inspector.connection_failed:
+                        raise RuntimeError('界面调试目标暂时断开')
+                    connection_attempt = 0
                     windows = visible_app_windows(family)
                     binding = bind_window(observations, windows, hwnd, self.last_target, self.last_hwnd)
                     if binding:
@@ -412,6 +447,7 @@ class Observer(QThread):
                             self.last_target = current.target_id
                             data = {**current.data, "client_origin": geometry[0], "client_size": geometry[1],
                                     "native_scale": window["scale"], "host_hwnd": self.last_hwnd}
+                            state.update(overlay_visible=False, badge_rect=None)
                             self.observation.emit(data)
                             state.update(thread_id=thread_id, status="connected", host_hwnd=self.last_hwnd,
                                          message="自动跟随当前会话" if hwnd == self.last_hwnd else "Codex 在后台，继续跟随当前会话")
@@ -433,6 +469,11 @@ class Observer(QThread):
                                    "无法唯一对应 Codex 窗口与当前会话界面" if observations else inspector.problem)
                         state.update(thread_id=None, status="hidden" if observations else "waiting_for_view", message=message)
                 except Exception as error:
+                    record('observer_connection_failed', error)
+                    inspector.close()
+                    inspector = Inspector(self.port)
+                    next_connect = start + (1, 2, 4, 8, 15)[min(connection_attempt, 4)]
+                    connection_attempt += 1
                     self.observation.emit(None)
                     state.update(thread_id=None, status="connection_error", message=f"无法自动跟随：{type(error).__name__}。请检查启动方式和版本兼容。")
                 state["heartbeat"] = time.time()
@@ -442,18 +483,32 @@ class Observer(QThread):
                     self.state_changed.emit(state["message"])
                     last_message = state["message"]
                 if start - last_write >= 1:
-                    write_state(state); last_write = start
+                    self.report(state); last_write = start
                 self.stop_event.wait(max(0, 0.25 - (time.monotonic() - start)))
         finally:
-            pool.shutdown(wait=True, cancel_futures=True)
+            pool.shutdown(wait=False, cancel_futures=True)
             inspector.close()
             state.update(status="stopped", message="悬浮条已停止", thread_id=None, heartbeat=time.time())
             state.update(overlay_visible=False, badge_rect=None)
-            write_state(state)
+            self.report(state)
+
+
+def guarded_ui(method):
+    @wraps(method)
+    def invoke(self, *arguments):
+        try:
+            return method(self, *arguments)
+        except Exception as error:
+            record('overlay_callback_failed', error, callback=method.__name__)
+            self.data = self.current = self.usage = None
+            self.badge.hide()
+            self.details.hide()
+            self.worker.placement = {'visible': False, 'thread_id': None, 'message': '界面暂不可用，正在重新识别'}
+    return invoke
 
 
 class Overlay:
-    def __init__(self, app: QApplication, port: int, app_pid: int, run_id: str):
+    def __init__(self, app: QApplication, port: int, app_pid: int, run_id: str, attachment_id: str | None = None):
         self.app = app
         self.badge, self.details = Badge(), Details()
         self.current = None
@@ -466,8 +521,10 @@ class Overlay:
         menu.addSeparator()
         details = menu.addAction("查看当前会话明细"); details.triggered.connect(self.toggle_details)
         quit_action = menu.addAction("退出悬浮条"); quit_action.triggered.connect(app.quit)
-        self.tray.setContextMenu(menu); self.tray.setToolTip("Codex 会话用量"); self.tray.show()
-        self.worker = Observer(port, app_pid, run_id)
+        self.tray.setContextMenu(menu); self.tray.setToolTip("Codex 会话用量")
+        if not attachment_id:
+            self.tray.show()
+        self.worker = Observer(port, app_pid, run_id, attachment_id)
         self.worker.observation.connect(self.observe)
         self.worker.snapshot.connect(self.update_usage)
         self.worker.state_changed.connect(self.update_state)
@@ -479,9 +536,11 @@ class Overlay:
         self.tray.setToolTip(message)
         self.state_action.setText(message)
 
+    @guarded_ui
     def observe(self, data: dict | None) -> None:
         self.data = data
         if not data:
+            self.current = self.usage = None
             self.worker.placement = {"visible": False, "thread_id": None, "message": ""}
             self.badge.hide(); self.details.hide(); return
         if self.current != data["threadId"]:
@@ -513,6 +572,7 @@ class Overlay:
         if self.details.isVisible():
             self.place_details(position, scale)
 
+    @guarded_ui
     def update_usage(self, usage: dict) -> None:
         if usage["thread_id"] != self.current:
             return
@@ -530,6 +590,7 @@ class Overlay:
             return
         position_without_focus(int(self.details.winId()), *rectangle, owner=self.data["host_hwnd"])
 
+    @guarded_ui
     def toggle_details(self) -> None:
         if self.details.isVisible():
             self.details.hide()
@@ -545,11 +606,11 @@ class Overlay:
         self.badge.hide(); self.details.hide(); self.tray.hide()
 
 
-def run_overlay(port: int, app_pid: int, run_id: str) -> int:
+def run_overlay(port: int, app_pid: int, run_id: str, attachment_id: str | None = None) -> int:
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(icon())
-    overlay = Overlay(app, port, app_pid, run_id)
+    overlay = Overlay(app, port, app_pid, run_id, attachment_id)
     return app.exec()
 
 
