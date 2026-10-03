@@ -8,7 +8,7 @@ description: 查询 Codex 会话及子智能体按模型、推理强度和 Fast 
 此插件的 Windows 程序与查询入口共用统计核心。插件根目录是本文件上方的 `../..`，运行根目录内的 `scripts/session-usage.ps1`。
 
 - 查询当前会话：`& '<插件根目录>/scripts/session-usage.ps1' -Action query`。脚本使用 `CODEX_THREAD_ID`，可通过 `-ThreadId '<会话 UUID>'` 指定其他会话；`-MainOnly` 只统计主会话。
-- 启动悬浮条：使用 `-Action launch`。如果返回 `waiting_for_restart`，说明当前 Codex 未启用本机调试连接，启动器已在托盘等待；用户保存工作并手动退出 Codex 后，它会自动重新打开当前安装版本并恢复悬浮条，无需再点击启动器。`ambiguous_host` 表示多个主进程，程序等待唯一实例，不猜测会话。管理进程在 Codex 关闭后保留待机。不要强制结束应用或正在运行的任务。
+- 启动悬浮条：使用 `-Action launch`。这是独立托盘工具；与官方 Codex 可以按任意顺序启动，普通启动没有调试端口时自动使用 Windows 辅助功能与当前进程的窗口路由日志。Codex 关闭后工具保持待机，官方图标重新打开后自动连接。`ambiguous_host` 表示多个主进程，程序等待唯一实例，不猜测会话。不要强制结束应用或正在运行的任务。
 - 查看悬浮条状态：使用 `-Action status`。`running` 表示管理进程运行，待机时 `overlay_visible=false`；`healthy` 表示心跳新鲜。
 - 诊断异常：使用 `-Action diagnose`，只读本地近期事件；没有自动上传。`recovery_paused` 表示一分钟内五次恢复失败，可点击托盘“恢复连接”或再次 launch。
 - 关闭悬浮条：使用 `-Action stop`，这不会关闭 Codex。
@@ -17,7 +17,7 @@ description: 查询 Codex 会话及子智能体按模型、推理强度和 Fast 
 
 `models[].configurations` 按模型、推理强度和请求服务等级分组，同样含主会话、子智能体与总量。`service_tier` 保留日志等级；`fast_mode: true/false/null` 表示 Fast 请求设置、普通或无法确认，不代表服务端实际等级。迟到的同轮元数据会补齐归属，但不会改变总量；累计缺口和冲突继续标明。
 
-普通 Codex 入口没有调试连接时，托盘通知插件正在待机。点击“恢复连接”后手动退出一次，由管理进程重新打开并连接；退出前可点击“取消恢复安排”。`status.restart_armed` 表示已安排该次恢复。未安排时 Codex 关闭后仅保持待机，不自行重开。
+`status.connection_mode` 表示 `windows_accessibility` 或 `cdp`。托盘“恢复连接”只重新尝试连接；不会关闭或重启 Codex。原生路径仅接受明确的 `/local/` 窗口路由与唯一窗口类型，缺少证据或同类窗口冲突时隐藏。
 
 总 token 已包含输入和输出；缓存输入和推理输出属于分项，不能再次相加。模型归属以本地记录为准，无法确认的用量列在 `unattributed`。查询读已有记录，不调用模型。
 

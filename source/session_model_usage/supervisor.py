@@ -27,6 +27,10 @@ REPORT_FIELDS = ("status", "message", "thread_id", "overlay_visible", "badge_rec
 class Backend:
     apps = staticmethod(running_apps)
 
+    def native_available(self, app):
+        from .native import log_roots
+        return any(root.is_dir() for root in log_roots(Path(app.exe())))
+
     def start(self):
         executable = find_app()
         port = free_port()
@@ -38,6 +42,10 @@ class Backend:
         return start_app(executable, arguments)
 
     def probe(self, app, port):
+        if port is None:
+            if not self.native_available(app):
+                raise RuntimeError('未找到官方窗口路由日志')
+            return
         inspector = Inspector(port)
         try:
             inspector.get_json("/json/version")
@@ -46,7 +54,7 @@ class Backend:
             inspector.close()
 
     def spawn(self, app, port, run_id, attachment_id):
-        process = subprocess.Popen(own_command("overlay", "--port", str(port), "--app-pid", str(app.pid),
+        process = subprocess.Popen(own_command("overlay", "--port", str(port or 0), "--app-pid", str(app.pid),
             "--run-id", run_id, "--attachment-id", attachment_id),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hidden_startup())
         created = psutil.Process(process.pid).create_time()
@@ -148,8 +156,7 @@ class Manager:
         self.attempt = 0
         self.next_attempt = 0
         self.start_deadline = None
-        self.restart_armed = True
-        self.open_requested = True
+        self.restart_armed = self.open_requested = False
         record("manual_retry", folder=self.folder)
 
     def cancel_retry(self):
@@ -232,13 +239,13 @@ class Manager:
             self.detach()
             self.next_attempt = 0
         self.state["port"] = port
-        if port is None:
+        native = port is None and getattr(self.backend, 'native_available', lambda app: False)(app)
+        self.state['connection_mode'] = 'windows_accessibility' if native else 'cdp'
+        if port is None and not native:
             self.detach()
-            self.restart_armed = self.restart_armed or self.open_requested
-            self.open_requested = False
-            self.state.update(status="waiting_for_restart", message=(
-                '已安排恢复：请手动退出 Codex 一次，插件会重新打开并连接；可从托盘取消' if self.restart_armed else
-                '插件正在待机，连接需要恢复：Codex 未开启本机调试；请从托盘点击恢复连接'))
+            self.open_requested = self.restart_armed = False
+            self.state.update(status="waiting_for_restart", message=
+                '插件正在待机：尚未找到官方窗口路由日志或调试连接，将继续检测')
             return
         self.open_requested = self.restart_armed = False
         if self.paused:
@@ -331,9 +338,6 @@ def run_supervisor(run_id: str, open_requested=False) -> int:
         state_action = menu.addAction("正在启动…")
         state_action.setEnabled(False)
         menu.addAction("恢复连接").triggered.connect(lambda: request("retry", run_id))
-        cancel_action = menu.addAction('取消恢复安排')
-        cancel_action.setEnabled(False)
-        cancel_action.triggered.connect(lambda: request('cancel_retry', run_id))
         menu.addAction("退出插件").triggered.connect(app.quit)
         tray.setContextMenu(menu)
         tray.show()
@@ -344,7 +348,6 @@ def run_supervisor(run_id: str, open_requested=False) -> int:
             try:
                 state_action.setText(value["message"])
                 tray.setToolTip(value["message"])
-                cancel_action.setEnabled(bool(value.get('restart_armed')))
                 host = (value.get('app_pid'), value.get('app_created'))
                 if value['status'] == 'waiting_for_restart' and host != notified_host:
                     notified_host = host

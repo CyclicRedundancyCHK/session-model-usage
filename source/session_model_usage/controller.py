@@ -84,7 +84,7 @@ def launch(*, recovery_run_id=None) -> dict:
             request("retry", state["run_id"])
             return state
         run_id = uuid.uuid4().hex
-        process = subprocess.Popen(own_command("supervise", "--run-id", run_id, "--open"),
+        process = subprocess.Popen(own_command("supervise", "--run-id", run_id),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, startupinfo=hidden_startup())
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:

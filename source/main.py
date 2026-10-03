@@ -19,7 +19,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Codex 会话模型用量 · 本机只读统计")
     parser.add_argument('--version', action='version', version=__version__)
     sub = parser.add_subparsers(dest="command")
-    sub.add_parser("launch", help="启动 Codex 和悬浮条；已有普通实例时提示手动退出")
+    sub.add_parser("launch", help="启动独立托盘工具，自动连接官方 Codex 窗口")
     query = sub.add_parser("query", help="查询会话用量 JSON")
     query.add_argument("--thread-id", default=os.environ.get("CODEX_THREAD_ID"))
     query.add_argument("--codex-home", type=Path)

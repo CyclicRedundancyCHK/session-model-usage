@@ -135,12 +135,11 @@ class RecoveryTests(unittest.TestCase):
         host.terminate.assert_not_called()
         host.kill.assert_not_called()
 
-    def test_explicit_recovery_arms_one_manual_restart(self):
+    def test_retry_does_not_reopen_codex_after_user_closes_it(self):
         self.backend.app(port=None); self.manager.retry(); self.manager.tick()
         self.backend.current=[]; self.manager.tick()
-        self.manager.start_future.result(timeout=2)
-        self.manager.tick()
-        self.assertEqual(self.backend.starts, 1)
+        self.assertIsNone(self.manager.start_future)
+        self.assertEqual(self.backend.starts, 0)
 
     def test_cancel_recovery_keeps_idle_after_codex_closes(self):
         self.backend.app(port=None); self.manager.retry(); self.manager.tick()

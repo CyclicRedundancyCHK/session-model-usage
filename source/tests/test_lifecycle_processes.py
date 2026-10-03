@@ -60,7 +60,8 @@ class NativeBackend(Backend):
         assert marker.exists() and int(marker.read_text())>0, 'Native test window not created'
         return self.host
     def probe(self, app, port):
-        assert app.pid==self.host.pid and port in (1234,4321)
+        assert app.pid==self.host.pid and port in (None,1234,4321)
+    def native_available(self, app): return True
     def spawn(self, app, port, run_id, attachment_id):
         path=self.folder/f'observer-{attachment_id}.json'
         child=subprocess.Popen([FIXTURE_PYTHON,'-c',CHILD,str(path),run_id,attachment_id],env=FIXTURE_ENV,
@@ -87,7 +88,7 @@ class LifecycleProcessTests(unittest.TestCase):
             manager=Manager('fixture',folder=Path(d),backend=backend)
             try:
                 for cycle in range(20):
-                    backend.open_fixture(); manager.tick()
+                    backend.open_fixture(port=None if cycle%2==0 else 4321); manager.tick()
                     self.wait(lambda:manager.report().get('status')=='connected')
                     manager.tick(); self.assertTrue(manager.state['overlay_visible'])
                     old_worker=manager.worker
@@ -117,8 +118,11 @@ class LifecycleProcessTests(unittest.TestCase):
             finally:
                 manager.detach(); manager.pool.shutdown(wait=True,cancel_futures=True); backend.cleanup()
 
-    def test_normal_launch_manual_recovery_handoff_cancel_and_stop(self):
+    def test_official_launch_automatic_connection_handoff_and_stop(self):
         class RecoveryBackend(NativeBackend):
+            def native_available(self, app): return True
+            def probe(self, app, port):
+                assert app.pid == self.host.pid and port in (None, 4321)
             def start(self):
                 self.starts += 1
                 return self.open_fixture(port=4321)
@@ -126,21 +130,24 @@ class LifecycleProcessTests(unittest.TestCase):
             backend=RecoveryBackend(Path(d)); manager=Manager('fixture',folder=Path(d),backend=backend)
             try:
                 backend.open_fixture(port=None); manager.tick()
-                self.assertEqual(manager.state['status'],'waiting_for_restart')
+                self.wait(lambda:manager.report().get('status')=='connected'); manager.tick()
+                self.assertEqual(manager.state['status'],'connected')
+                self.assertEqual(manager.state['connection_mode'],'windows_accessibility')
                 self.assertEqual(backend.starts,0)
                 manager.retry(); manager.tick(); manager.cancel_retry(); manager.tick()
                 backend.host.terminate(); backend.host.wait(5); manager.tick()
                 self.assertEqual(backend.starts,0)
                 backend.open_fixture(port=None); manager.tick(); manager.retry(); manager.tick()
                 backend.host.terminate(); backend.host.wait(5); manager.tick()
-                manager.start_future.result(timeout=5); manager.tick()
+                self.assertIsNone(manager.start_future)
+                backend.open_fixture(port=4321); manager.tick()
                 self.wait(lambda:manager.report().get('status')=='connected'); manager.tick()
-                self.assertEqual(backend.starts,1)
+                self.assertEqual(backend.starts,0)
                 self.assertEqual(manager.state['port'],4321)
                 self.assertTrue(manager.state['overlay_visible'])
                 self.assertFalse(manager.restart_armed)
                 manager.stop_event.set(); manager.detach(); manager.tick()
-                self.assertEqual(backend.starts,1)
+                self.assertEqual(backend.starts,0)
                 self.assertFalse(manager.state['overlay_visible'])
             finally:
                 manager.detach(); manager.pool.shutdown(wait=True,cancel_futures=True); backend.cleanup()

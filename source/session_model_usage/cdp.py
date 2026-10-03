@@ -253,7 +253,8 @@ def bind_window(observations: list[Observation], windows: list[dict],
     pairs = [(view, window) for view in observations for window in windows
              if view.data.get("composer") and
              not (view.bounds and view.bounds.get("windowState") == "minimized") and
-             screen_matches(view.data, window["rectangles"], window["scale"], window["work_origin"])]
+             ((view.data.get('nativeHwnd') == window['hwnd']) if view.data.get('nativeHwnd') else
+              screen_matches(view.data, window["rectangles"], window["scale"], window["work_origin"]))]
     focused = [(view, window) for view, window in pairs
                if window["hwnd"] == foreground_hwnd and view.data.get("focused")]
     if len(focused) == 1:

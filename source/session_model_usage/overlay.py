@@ -388,12 +388,18 @@ class Observer(QThread):
         else:
             write_state(state)
 
+    def inspector(self):
+        if self.port:
+            return Inspector(self.port)
+        from .native import NativeInspector
+        return NativeInspector(self.app_pid)
+
     def run(self) -> None:
         inspector = pool = None
         state = {"status": "starting", "message": "正在连接", "thread_id": None,
                  "overlay_visible": False, "badge_rect": None}
         try:
-            inspector, service = Inspector(self.port), UsageService()
+            inspector, service = self.inspector(), UsageService()
             app = psutil.Process(self.app_pid)
             app_created = app.create_time()
             self.observe_loop(inspector, service, app_created, state)
@@ -478,7 +484,7 @@ class Observer(QThread):
                 except Exception as error:
                     record('observer_connection_failed', error)
                     inspector.close()
-                    inspector = Inspector(self.port)
+                    inspector = self.inspector()
                     next_connect = start + (1, 2, 4, 8, 15)[min(connection_attempt, 4)]
                     connection_attempt += 1
                     self.observation.emit(None)
