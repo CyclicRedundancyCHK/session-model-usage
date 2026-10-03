@@ -2,7 +2,7 @@
 
 Windows 上的 Codex 会话用量插件与伴随悬浮条。只读本机日志，显示主会话和子智能体按模型、推理强度统计的 token 用量，统计过程不调用模型。
 
-当前为本地修复版 **0.1.4-local.1**，未发布到 GitHub。安装包由本机 `dist` 目录提供。
+当前源码版本为 **0.1.4-local.1**，已同步到 GitHub。此版本尚未创建 GitHub Release，Windows 安装包目前由本机 `dist` 目录提供，也可按下方说明从源码构建。
 
 ![深色用量详情](assets/preview-dark.png)
 
