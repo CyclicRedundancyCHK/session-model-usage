@@ -1,6 +1,6 @@
 ---
 name: session-model-usage
-description: 查询 Codex 当前会话及其子智能体按模型和推理强度统计的 token 用量，启动、检查或停止 Windows 会话用量悬浮条。
+description: 查询 Codex 会话及子智能体按模型、推理强度和 Fast 请求设置统计的 token 用量，启动、检查或停止 Windows 悬浮条。
 ---
 
 # 会话模型用量
@@ -14,6 +14,10 @@ description: 查询 Codex 当前会话及其子智能体按模型和推理强度
 - 关闭悬浮条：使用 `-Action stop`，这不会关闭 Codex。
 
 查询返回 JSON：`totals` 为总量，`models` 为每个模型及主会话/子智能体分项；各模型的 `reasoning_efforts` 按实际推理强度分组，同组也含 `totals`、`main`、`subagents`。`reasoning_effort: null` 表示未记录，字符串 `none` 表示明确关闭推理。不要用当前模型选择或推理强度填补历史缺失。`threads` 为来源，`warnings` 为证据缺口。`pending` 与空 `totals` 表示还没有用量记录，不能解释为零。`partial` 表示统计不完整，回答时保留这一限制。
+
+`models[].configurations` 按模型、推理强度和请求服务等级分组，同样含主会话、子智能体与总量。`service_tier` 保留日志等级；`fast_mode: true/false/null` 表示 Fast 请求设置、普通或无法确认，不代表服务端实际等级。迟到的同轮元数据会补齐归属，但不会改变总量；累计缺口和冲突继续标明。
+
+普通 Codex 入口没有调试连接时，托盘通知插件正在待机。点击“恢复连接”后手动退出一次，由管理进程重新打开并连接；退出前可点击“取消恢复安排”。`status.restart_armed` 表示已安排该次恢复。未安排时 Codex 关闭后仅保持待机，不自行重开。
 
 总 token 已包含输入和输出；缓存输入和推理输出属于分项，不能再次相加。模型归属以本地记录为准，无法确认的用量列在 `unattributed`。查询读已有记录，不调用模型。
 

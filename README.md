@@ -2,11 +2,13 @@
 
 Windows 上的 Codex 会话用量插件与伴随悬浮条。只读本机日志，显示主会话和子智能体按模型、推理强度统计的 token 用量，统计过程不调用模型。
 
+当前为本地修复版 **0.1.3-local.1**，未发布到 GitHub。安装包由本机 `dist` 目录提供。
+
 ![深色用量详情](assets/preview-dark.png)
 
 ## 安装
 
-1. 从 [Releases](https://github.com/CyclicRedundancyCHK/session-model-usage/releases) 下载 `session-model-usage-v0.1.2-windows-x64.zip`。
+1. 使用本地 `session-model-usage-v0.1.3-local.1-windows-x64.zip`。
 2. 完整解压，保留 `runtime` 及其 `_internal` 文件夹。无需安装 Python。
 3. 双击 `安装插件.cmd`，再从 Windows 开始菜单打开 **Codex 会话用量**。
 4. 如果 Codex 已通过普通方式启动，启动器会在托盘等待。保存工作并手动完全退出 Codex 后，它会自动用正确参数重新打开。
@@ -21,13 +23,15 @@ Windows 上的 Codex 会话用量插件与伴随悬浮条。只读本机日志�
 
 - 默认递归汇总主会话和所有子智能体，包括已结束的子智能体。
 - 总量保留日志的 `total_tokens`；缓存输入和推理输出是分项，不重复相加。
-- 同一模型的不同推理强度分别列出；未记录的归属明确展示，不用当前设置补填历史。
+- 同一模型的不同推理强度和 Fast 请求设置分别列出；迟到的同轮元数据会补齐已记录用量，不用当前设置补填历史。
 - 跟随会话、窗口位置、缩放与深浅主题。Codex 失去焦点后继续显示，其他应用遮挡它时也遮挡用量条；最小化、隐藏或无法确认会话时隐藏。
 - Codex 升级或普通启动导致调试参数丢失时，再次打开专用启动器进入恢复等待，手动退出后自动恢复。
 
 ![浅色用量详情](assets/preview-light.png)
 
-独立托盘管理进程在 Codex 关闭后保持待机，不自行重开。再次打开 Codex 后重新连接；悬浮条异常退出或心跳停止时自动恢复。一分钟内五次失败会暂停，并提供“恢复连接”。临时连接错误按 1、2、4、8、15 秒重试。
+独立托盘管理进程在 Codex 关闭后保持待机，不自行重开。再次打开带调试连接的 Codex 后重新连接。保留官方 Codex 入口：普通启动未开启调试连接时，托盘通知插件正在待机；点击“恢复连接”后手动退出一次，程序重新打开并连接。退出前可点击“取消恢复安排”，随后关闭 Codex 不会被重新拉起。
+
+悬浮条异常退出或心跳停止时自动恢复。一分钟内五次失败会暂停，并提供“恢复连接”。临时连接错误按 1、2、4、8、15 秒重试。
 
 程序每 250 毫秒检查会话和位置，每秒增量刷新用量。只读取本机的会话索引和日志；调试连接验证为 Codex 自身在回环地址监听。没有开机自启。
 
@@ -48,6 +52,8 @@ Windows 上的 Codex 会话用量插件与伴随悬浮条。只读本机日志�
 `query` 返回 JSON，默认使用 `CODEX_THREAD_ID` 或正在跟随的会话。`--codex-home <目录>` 可指定日志目录。`stop` 退出管理进程和悬浮条并取消恢复，Codex 继续运行。`status.running` 表示管理进程运行，待机时 `overlay_visible=false`；`healthy` 表示心跳新鲜；`supervisor_pid` 和 `worker_pid` 分别表示管理进程与实际悬浮条子进程。`overlay_pid` 兼容旧缓存，待机时可能指向管理进程。`diagnose` 只读取本地轮转诊断，不上传日志。
 
 `complete` 表示现有记录可以完成统计，`partial` 表示存在证据缺口，`pending` 和 `totals: null` 表示尚无用量记录。`reasoning_effort: null` 表示没有记录，`none` 表示明确关闭推理。
+
+`models[].reasoning_efforts` 保留原有按强度汇总。新增 `models[].configurations`，按推理强度与服务等级联合分组，含 `service_tier`、`fast_mode`、`totals`、`main`、`subagents` 和记录数量。`priority/fast` 对应 Fast，`default/standard` 对应普通；缺失或其他等级对应 `fast_mode: null`，其他等级保留原值。Fast 是日志中的请求设置，不代表服务端实际采用的等级。
 
 ## 开发与构建
 

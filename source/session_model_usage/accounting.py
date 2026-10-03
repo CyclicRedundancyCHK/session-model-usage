@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from contextlib import closing
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import sqlite3
 from typing import Any
+
+from .metadata import TurnMetadata, fields, fast_mode
 
 
 TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
@@ -55,6 +57,14 @@ class Entry:
     source: str
     response_id: str | None = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
+    position: int = 0
+    explicit_metadata: dict = field(default_factory=dict, repr=False)
+    active_turn: str | None = None
+
+    @property
+    def fast_mode(self):
+        return fast_mode(self.service_tier)
 
 
 @dataclass
@@ -103,11 +113,7 @@ class Rollout:
         self.identity: tuple[int, int] | None = None
         self.created: datetime | None = None
         self.forked = False
-        self.current_turn: str | None = None
-        self.current_model: str | None = None
-        self.current_effort: str | None = None
-        self.turn_models: dict[str, str] = {}
-        self.turn_efforts: dict[str, str | None] = {}
+        self.metadata = TurnMetadata()
         self.records: dict[Any, Entry] = {}
         self.primary_signals: list[PrimarySignal] = []
         self.position = 0
@@ -165,18 +171,9 @@ class Rollout:
         if kind == "turn_context":
             if inherited:
                 return
-            turn, model = data.get("turn_id"), data.get("model")
+            turn = data.get('turn_id')
             if isinstance(turn, str):
-                self.current_turn = turn
-            if isinstance(model, str) and model:
-                self.current_model = model
-                if turn:
-                    self.turn_models[turn] = model
-            else:
-                self.current_model = None
-            self.current_effort = recorded_effort(data)
-            if isinstance(turn, str):
-                self.turn_efforts[turn] = self.current_effort
+                self.metadata.context(turn, self.position, data)
             return
         if kind == "token_usage_record":
             if data.get("thread_id") != self.thread_id:
@@ -186,21 +183,26 @@ class Rollout:
                 self.warning_set.add("存在缺失或无效的请求用量")
                 return
             turn = data.get("turn_id")
+            self.metadata.note_request(turn, self.position)
             response = data.get("response_id")
             key = response or (turn, row.get("timestamp"), usage.vector())
             if not response:
                 self.warning_set.add("部分请求缺少响应 ID，去重证据不完整")
-            model = data.get("model") or (self.current_model if turn == self.current_turn else self.turn_models.get(turn))
-            if not isinstance(model, str) or not model:
-                model = None
-            level = (recorded_effort(data) if "reasoning_effort" in data or "effort" in data else
-                     self.current_effort if turn == self.current_turn else self.turn_efforts.get(turn))
-            entry = Entry(usage, model, turn, "token_usage_record", response, level)
+            explicit = fields(data)
+            entry = Entry(usage, explicit.get('model'), turn, "token_usage_record", response,
+                          explicit.get('reasoning_effort'), explicit.get('service_tier'),
+                          self.position, explicit, self.metadata.current_turn)
             previous = self.records.get(key)
             if previous and previous.usage != usage:
                 self.warning_set.add("同一响应 ID 出现冲突用量，仅保留第一条")
             else:
                 self.records.setdefault(key, entry)
+                if previous:
+                    for name, value in explicit.items():
+                        if name not in previous.explicit_metadata:
+                            previous.explicit_metadata[name] = value
+                        elif previous.explicit_metadata[name] != value:
+                            self.warning_set.add('同一响应 ID 出现冲突配置，仅保留第一条明确记录')
             cumulative = Usage.parse(data.get("thread_token_usage"))
             if previous is None:
                 self.primary_signals.append(PrimarySignal(entry, cumulative, self.position, time))
@@ -210,32 +212,23 @@ class Rollout:
         if kind != "event_msg" or inherited:
             return
         event = data.get("type")
+        if data.get('thread_id') not in (None, self.thread_id):
+            return
+        if event in ('task_complete', 'task_completed', 'turn_aborted'):
+            self.metadata.complete(data.get('turn_id'))
+            return
         if event == "task_started":
             if isinstance(data.get("turn_id"), str):
-                self.current_turn = data["turn_id"]
-                # Do not carry a model from another turn before its context arrives.
-                self.current_model = self.turn_models.get(self.current_turn)
-                self.current_effort = self.turn_efforts.get(self.current_turn)
+                self.metadata.begin(data['turn_id'], self.position)
             return
         if event in ("model_rerouted", "model/rerouted"):
-            model = data.get("to_model") or data.get("toModel")
-            if isinstance(model, str) and model:
-                self.current_model = model
-                if self.current_turn:
-                    self.turn_models[self.current_turn] = model
-            if "reasoning_effort" in data or "effort" in data:
-                self.current_effort = recorded_effort(data)
-                if self.current_turn:
-                    self.turn_efforts[self.current_turn] = self.current_effort
+            self.metadata.reroute(self.position, data, data.get('turn_id'))
             return
         if event == "thread_settings_applied":
             settings = data.get("thread_settings") or data
-            if isinstance(settings, dict) and isinstance(settings.get("model"), str):
-                self.current_model = settings["model"]
-                self.current_effort = recorded_effort(settings)
-                if self.current_turn:
-                    self.turn_models[self.current_turn] = self.current_model
-                    self.turn_efforts[self.current_turn] = self.current_effort
+            if isinstance(settings, dict):
+                self.metadata.apply_settings(self.position, settings, data.get('turn_id'))
+            return
         if event != "token_count":
             return
         info = data.get("info")
@@ -245,13 +238,15 @@ class Rollout:
         if cumulative is None:
             return
         last = Usage.parse(info.get("last_token_usage"))
-        snap = SnapshotEvent(cumulative, last, self.current_turn, self.current_model,
-                             self.position, time, self.current_effort)
+        config = self.metadata.resolve(self.metadata.current_turn, self.position)
+        snap = SnapshotEvent(cumulative, last, self.metadata.current_turn, config['model'],
+                             self.position, time, config['reasoning_effort'])
         self.snapshots.append(snap)
         self.latest_total = cumulative
 
     def entries(self) -> tuple[list[Entry], list[str]]:
-        entries = list(self.records.values())
+        entries = [replace(entry, **self.metadata.resolve(entry.turn_id, entry.position,
+                    entry.explicit_metadata, entry.active_turn)) for entry in self.records.values()]
         warnings = set(self.warning_set)
         baseline = Usage()
         seen: set[Any] = set()
@@ -323,8 +318,9 @@ class Rollout:
                 warnings.add("旧版用量有累计缺口，缺口列为未归属")
                 entries.append(Entry(delta, None, event.turn_id, "legacy_gap"))
             else:
-                entries.append(Entry(delta, event.model, event.turn_id, "token_count_delta",
-                                     reasoning_effort=event.reasoning_effort))
+                config = self.metadata.resolve(event.turn_id, event.position)
+                entries.append(Entry(delta, config['model'], event.turn_id, "token_count_delta",
+                                     reasoning_effort=config['reasoning_effort'], service_tier=config['service_tier']))
         if not self.meta_seen:
             warnings.add("未找到匹配当前会话的元数据")
         if any(e.model is None for e in entries):
@@ -448,7 +444,7 @@ class UsageService:
                 name = entry.model or "unattributed"
                 model = per_model.setdefault(name, {"model": name, "totals": Usage(),
                                                     "main": Usage(), "subagents": Usage(), "usage_records": 0,
-                                                    "reasoning_efforts": {}})
+                                                    "reasoning_efforts": {}, "configurations": {}})
                 model["totals"] += entry.usage
                 model["main" if role == "main" else "subagents"] += entry.usage
                 model["usage_records"] += 1
@@ -458,6 +454,13 @@ class UsageService:
                 group["totals"] += entry.usage
                 group["main" if role == "main" else "subagents"] += entry.usage
                 group["usage_records"] += 1
+                configuration = model['configurations'].setdefault((entry.reasoning_effort, entry.service_tier),
+                    {'reasoning_effort': entry.reasoning_effort, 'service_tier': entry.service_tier,
+                     'fast_mode': entry.fast_mode, 'totals': Usage(), 'main': Usage(),
+                     'subagents': Usage(), 'usage_records': 0})
+                configuration['totals'] += entry.usage
+                configuration['main' if role == 'main' else 'subagents'] += entry.usage
+                configuration['usage_records'] += 1
             totals += thread_total
             threads.append({"thread_id": owner, "role": role, "agent_path": row.get("agent_path"),
                             "totals": asdict(thread_total) if entries else None,
@@ -471,11 +474,13 @@ class UsageService:
         for model in per_model.values():
             levels = [serialise(group) for group in model["reasoning_efforts"].values()]
             levels.sort(key=lambda group: (-group["totals"]["total_tokens"], group["reasoning_effort"] or ""))
-            models.append({**serialise(model), "reasoning_efforts": levels})
+            configurations = [serialise(group) for group in model['configurations'].values()]
+            configurations.sort(key=lambda g: (-g['totals']['total_tokens'], g['reasoning_effort'] or '', g['service_tier'] or ''))
+            models.append({**serialise(model), "reasoning_efforts": levels, 'configurations': configurations})
         models.sort(key=lambda m: (-m["totals"]["total_tokens"], m["model"]))
         return {"schema_version": 1, "thread_id": thread_id, "include_descendants": include_descendants,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "status": "partial" if warnings else "complete" if models else "pending",
                 "totals": asdict(totals) if models else None, "models": models, "threads": threads,
                 "warnings": sorted(set(warnings)),
-                "attribution": "模型和推理强度以本地请求、轮次及明确的设置或重路由记录为准；缺失强度保留为 null"}
+                "attribution": "模型、推理强度与服务等级以本地请求、轮次及明确设置或重路由记录为准；Fast 为请求设置，不代表服务端实际等级；缺失字段保留为 null"}

@@ -41,7 +41,7 @@ def status() -> dict:
 
 
 def request(action: str, run_id: str) -> bool:
-    if action not in ("stop", "retry"):
+    if action not in ("stop", "retry", "cancel_retry"):
         raise ValueError("Unknown manager action")
     return atomic_json(state_directory() / "commands" / (uuid.uuid4().hex + ".json"),
                        {"action": action, "run_id": run_id})

@@ -142,6 +142,22 @@ class RecoveryTests(unittest.TestCase):
         self.manager.tick()
         self.assertEqual(self.backend.starts, 1)
 
+    def test_cancel_recovery_keeps_idle_after_codex_closes(self):
+        self.backend.app(port=None); self.manager.retry(); self.manager.tick()
+        atomic_json(self.folder/'commands/cancel.json', {'action':'cancel_retry','run_id':'test'})
+        self.manager.tick(); self.manager.publish()
+        self.assertFalse(self.manager.state['restart_armed'])
+        self.assertIn('正在待机', self.manager.state['message'])
+        self.backend.current=[]; self.manager.tick()
+        self.assertEqual(self.backend.starts,0)
+
+    def test_successful_connection_consumes_restart_arrangement(self):
+        self.backend.app(port=None); self.manager.retry(); self.manager.tick()
+        self.backend.app(pid=102,port=4321); self.manager.tick(); self.manager.publish()
+        self.assertFalse(self.manager.state['restart_armed'])
+        self.backend.current=[]; self.manager.tick()
+        self.assertEqual(self.backend.starts,0)
+
     def test_cold_start_retries_after_ninety_seconds(self):
         self.backend.app(); self.backend.probe_error=OSError('fixture')
         self.manager.tick(); self.clock.advance(91); self.manager.tick()

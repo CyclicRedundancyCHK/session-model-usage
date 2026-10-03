@@ -167,9 +167,10 @@ class ModelCard(QFrame):
         box = QVBoxLayout(self); box.setContentsMargins(16, 12, 16, 12); box.setSpacing(8)
         head = QHBoxLayout(); head.setSpacing(8)
         self.name, self.effort, self.total = label(name="modelName"), label(name="effort"), label(name="cardTotal")
+        self.speed = label(name='speed')
         self.name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.effort.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        head.addWidget(self.name, 1); head.addWidget(self.effort); head.addStretch(1)
+        head.addWidget(self.name, 1); head.addWidget(self.effort); head.addWidget(self.speed); head.addStretch(1)
         head.addWidget(self.total); head.addWidget(label("tokens", "muted"))
         box.addLayout(head)
         metrics = QHBoxLayout(); metrics.setSpacing(16)
@@ -190,11 +191,16 @@ class ModelCard(QFrame):
 
     def update_usage(self, data: dict) -> None:
         self.name.setText(model_name(data["model"]))
-        self.name.setMaximumWidth(min(220, self.name.fontMetrics().horizontalAdvance(self.name.text()) + 2))
+        self.name.setMaximumWidth(min(190, self.name.fontMetrics().horizontalAdvance(self.name.text()) + 2))
         self.name.setToolTip(data["model"])
         level = data.get("reasoning_effort")
         self.effort.setText(effort_name(level))
         self.effort.setToolTip(f"推理强度：{level}" if level is not None else "本地记录没有推理强度，保留为未记录")
+        tier, fast = data.get('service_tier'), data.get('fast_mode')
+        self.speed.setText('Fast' if fast is True else '普通' if fast is False else
+                           f'其他：{tier}' if tier is not None else '未记录')
+        self.speed.setToolTip(f'日志记录的请求服务等级：{tier or "未记录"}；不代表服务端实际采用的等级')
+        self.speed.setStyleSheet('color:#0A84FF;' if fast is True else '')
         number(self.total, data["totals"]["total_tokens"])
         for key, widget in self.values.items():
             number(widget, data["totals"].get(key, 0))
@@ -289,14 +295,14 @@ class Details(QFrame):
         self.group = QButtonGroup(self); self.group.setExclusive(True)
         self.pages = QStackedWidget()
         self.models, self.threads = CardList(ModelCard), CardList(ThreadCard)
-        for index, (title, widget) in enumerate((("模型与推理强度", self.models), ("智能体", self.threads))):
+        for index, (title, widget) in enumerate((("模型、推理强度与 Fast", self.models), ("智能体", self.threads))):
             button = QPushButton(title); button.setObjectName("segment"); button.setCheckable(True)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus); self.group.addButton(button, index); segmented.addWidget(button)
             self.pages.addWidget(widget)
         self.group.button(0).setChecked(True)
         self.group.idClicked.connect(self.pages.setCurrentIndex)
         layout.addWidget(segments); layout.addWidget(self.pages, 1)
-        self.notice = label("总量 = 输入 + 输出。缓存和推理是分项；同一模型的不同强度分别列出。", "notice")
+        self.notice = label("总量 = 输入 + 输出，分项不重复累加。Fast 为日志中的请求设置，未验证服务端实际等级。", "notice")
         self.notice.setWordWrap(True); layout.addWidget(self.notice)
         self.warning = label(name="warning"); self.warning.setWordWrap(True); self.warning.hide()
         layout.addWidget(self.warning)
@@ -316,6 +322,7 @@ class Details(QFrame):
             QLabel#total {{ font-family:'Segoe UI Variable Display'; font-size:32px; font-weight:600; }}
             QLabel#unit {{ color:{c['muted']}; font-size:14px; padding-bottom:6px; }}
             QLabel#muted, QLabel#notice {{ color:{c['muted']}; font-size:11px; }}
+            QLabel#speed {{ background:{c['segment']}; color:{c['muted']}; border-radius:5px; padding:3px 6px; font-size:11px; }}
             QLabel#recordState {{ color:{c['muted']}; font-size:11px; }}
             QLabel#warning {{ color:{'#FFB340' if dark else '#965B00'}; font-size:11px; }}
             QFrame#modelCard, QFrame#threadCard {{ background:{c['card']}; border:1px solid {c['edge']}; border-radius:13px; }}
@@ -348,9 +355,9 @@ class Details(QFrame):
         self.meta.setToolTip(thread_id or "")
         entries = []
         for model in snapshot.get("models", []) if snapshot else []:
-            for group in model.get("reasoning_efforts") or [{**model, "reasoning_effort": None}]:
+            for group in model.get('configurations') or model.get("reasoning_efforts") or [{**model, "reasoning_effort": None}]:
                 entries.append({**group, "model": model["model"]})
-        self.models.update_usage(entries, [(e["model"], e["reasoning_effort"]) for e in entries])
+        self.models.update_usage(entries, [(e["model"], e["reasoning_effort"], e.get('service_tier')) for e in entries])
         threads = snapshot.get("threads", []) if snapshot else []
         self.threads.update_usage(threads, [e["thread_id"] for e in threads])
         warnings = snapshot.get("warnings", []) if snapshot else []
@@ -633,6 +640,9 @@ def preview(path: Path, dark: bool = True) -> None:
                    "totals": {"total_tokens": 98000}, "status": "complete"},
                   {"thread_id": "demo-child", "role": "subagent", "agent_path": "/root/review",
                    "totals": {"total_tokens": 66000}, "status": "complete"}]}
+    for model, tier in zip(sample['models'], ('priority', 'default')):
+        model['configurations'] = [{**group, 'service_tier': tier, 'fast_mode': tier == 'priority'}
+                                   for group in model['reasoning_efforts']]
     details.update_usage(sample, "示例会话")
     details.show(); app.processEvents()
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -95,6 +95,7 @@ class Manager:
         self.state.update(thread_id=None, overlay_visible=False, badge_rect=None, host_hwnd=None)
 
     def publish(self):
+        self.state['restart_armed'] = self.restart_armed
         self.state["heartbeat"] = time.time()
         self.state["worker_heartbeat"] = self.report().get("heartbeat") if self.worker else None
         write_state(self.state, self.folder)
@@ -151,6 +152,10 @@ class Manager:
         self.open_requested = True
         record("manual_retry", folder=self.folder)
 
+    def cancel_retry(self):
+        self.restart_armed = self.open_requested = False
+        record('manual_retry_cancelled', folder=self.folder)
+
     def commands(self):
         legacy = self.folder / 'stop.request'
         try:
@@ -169,6 +174,8 @@ class Manager:
                     self.stop_event.set()
                 elif value.get("action") == "retry":
                     self.retry()
+                elif value.get('action') == 'cancel_retry':
+                    self.cancel_retry()
             try:
                 path.unlink()
             except OSError:
@@ -229,7 +236,9 @@ class Manager:
             self.detach()
             self.restart_armed = self.restart_armed or self.open_requested
             self.open_requested = False
-            self.state.update(status="waiting_for_restart", message="Codex 未启用本机调试；点击托盘恢复连接，再手动退出 Codex 一次")
+            self.state.update(status="waiting_for_restart", message=(
+                '已安排恢复：请手动退出 Codex 一次，插件会重新打开并连接；可从托盘取消' if self.restart_armed else
+                '插件正在待机，连接需要恢复：Codex 未开启本机调试；请从托盘点击恢复连接'))
             return
         self.open_requested = self.restart_armed = False
         if self.paused:
@@ -294,6 +303,7 @@ class Manager:
                 self.stop_event.wait(0.5)
         finally:
             self.detach()
+            self.restart_armed = self.open_requested = False
             self.state.update(status="stopped", message="插件已退出", thread_id=None)
             self.publish()
             self.pool.shutdown(wait=False, cancel_futures=True)
@@ -321,13 +331,26 @@ def run_supervisor(run_id: str, open_requested=False) -> int:
         state_action = menu.addAction("正在启动…")
         state_action.setEnabled(False)
         menu.addAction("恢复连接").triggered.connect(lambda: request("retry", run_id))
+        cancel_action = menu.addAction('取消恢复安排')
+        cancel_action.setEnabled(False)
+        cancel_action.triggered.connect(lambda: request('cancel_retry', run_id))
         menu.addAction("退出插件").triggered.connect(app.quit)
         tray.setContextMenu(menu)
         tray.show()
         worker = Worker()
+        notified_host = None
         def update(value):
-            state_action.setText(value["message"])
-            tray.setToolTip(value["message"])
+            nonlocal notified_host
+            try:
+                state_action.setText(value["message"])
+                tray.setToolTip(value["message"])
+                cancel_action.setEnabled(bool(value.get('restart_armed')))
+                host = (value.get('app_pid'), value.get('app_created'))
+                if value['status'] == 'waiting_for_restart' and host != notified_host:
+                    notified_host = host
+                    tray.showMessage('Codex 会话用量', value['message'], QSystemTrayIcon.MessageIcon.Information, 10000)
+            except Exception as error:
+                record('tray_update_failed', error)
         worker.changed.connect(update)
         worker.finished.connect(app.quit)
         def close():
