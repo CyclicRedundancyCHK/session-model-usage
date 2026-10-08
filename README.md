@@ -2,13 +2,13 @@
 
 Windows 上的 Codex 会话用量插件与伴随悬浮条。只读本机日志，显示主会话和子智能体按模型、推理强度统计的 token 用量，统计过程不调用模型。
 
-当前源码版本为 **0.1.4-local.1**，已同步到 GitHub。此版本尚未创建 GitHub Release，Windows 安装包目前由本机 `dist` 目录提供，也可按下方说明从源码构建。
+当前本地修复版本为 **0.1.5-local.1**，兼容 Codex 26.1002.7124.0 的额外启动窗口和辅助功能元素失效。此修复未推送 GitHub，Windows 安装包由本机 `dist` 目录提供，也可按下方说明从源码构建。
 
 ![深色用量详情](assets/preview-dark.png)
 
 ## 安装
 
-1. 使用本地 `session-model-usage-v0.1.4-local.1-windows-x64.zip`。
+1. 使用本地 `session-model-usage-v0.1.5-local.1-windows-x64.zip`。
 2. 完整解压，保留 `runtime` 及其 `_internal` 文件夹。无需安装 Python。
 3. 双击 `安装插件.cmd`，再从 Windows 开始菜单打开 **Codex 会话用量**。
 4. 工具与 Codex 可以按任意顺序打开。通过官方图标启动 Codex 后，托盘工具会自动连接；关闭 Codex 后工具继续待机，重开后恢复。无需退出当前会话或更换官方图标。

@@ -20,6 +20,9 @@ from .platform_win import alive, foreground_info, visible_app_windows
 
 THREAD = re.compile(r'^/local/([a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12})(?:[/?#]|$)')
 FIELD = re.compile(r'(?:^|\s)(ownerRoutePath|windowId|appearance|webContentsId)=([^\s]+)')
+EVENT = re.compile(r'^\S+\s+info\s+(?:'
+                   r'\[electron-message-handler\] IAB_LIFECYCLE received browser sidebar owner sync(?:\s|$)|'
+                   r'\[window-manager\] window main frame finished load(?:\s|$))')
 
 
 def log_roots(executable: Path) -> list[Path]:
@@ -47,6 +50,8 @@ class Routes:
 
     def consume(self, line: str) -> None:
         # Neither arbitrary thread activity nor resume messages identify a view.
+        if not EVENT.match(line):
+            return
         route_event = 'IAB_LIFECYCLE received browser sidebar owner sync' in line
         window_event = '[window-manager] window main frame finished load' in line
         if not route_event and not window_event:
@@ -125,7 +130,11 @@ class Routes:
             self.routes.clear(); self.appearances.clear()
 
     def for_appearance(self, appearance: str) -> dict | None:
-        keys = [key for key, value in self.appearances.items() if value[1] == appearance]
+        # New desktop versions also load non-conversation shell windows with
+        # appearance=primary. Only an explicit owner-route notification makes
+        # a log window eligible. Never choose the most recently active route.
+        keys = [key for key, value in self.appearances.items()
+                if value[1] == appearance and key in self.routes]
         return self.routes.get(keys[0]) if len(keys) == 1 else None
 
 
@@ -233,7 +242,19 @@ class NativeInspector:
             self.problem = '正在同步当前进程的窗口路由，确认前隐藏旧用量'
             return []
         windows = visible_app_windows({self.pid})
-        snapshots = [(w, self.reader.read(w)) for w in windows]
+        snapshots = []
+        self.problem = '当前窗口未提供可确认的输入栏辅助功能，等待界面加载'
+        for window in windows:
+            try:
+                snapshots.append((window, self.reader.read(window)))
+            except Exception as error:
+                # Chromium may invalidate cached elements during navigation.
+                # A failed snapshot hides this HWND; it must not destroy the
+                # incremental log reader or block other verified windows.
+                from .diagnostics import record
+                record('native_window_snapshot_failed', error)
+                snapshots.append((window, None))
+                self.problem = '窗口辅助功能暂不可用，正在重试；确认前隐藏用量'
         results = []
         foreground, _ = foreground_info()
         for window, view in snapshots:

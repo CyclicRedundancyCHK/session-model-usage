@@ -1,6 +1,6 @@
 {
   "name": "session-model-usage",
-  "version": "0.1.4-local.1",
+  "version": "0.1.5-local.1",
   "description": "本地统计 Codex 会话和子智能体按模型、推理强度与 Fast 请求设置的 token 用量，并提供 Windows 悬浮条。",
   "author": {
     "name": "CyclicRedundancyCHK"

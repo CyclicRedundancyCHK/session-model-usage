@@ -47,6 +47,22 @@ class RoutesTests(unittest.TestCase):
         r=Routes(1,CREATED,[]);r.consume(loaded());r.consume(route())
         r.consume(loaded(window=2));r.consume(route(window=2))
         self.assertIsNone(r.for_appearance('primary'))
+    def test_new_desktop_non_conversation_shell_does_not_block_primary(self):
+        r=Routes(1,CREATED,[]);r.consume(loaded());r.consume(route())
+        r.consume(loaded(window=3));r.consume(loaded('detached',4))
+        self.assertEqual(r.for_appearance('primary')['route'],'/local/'+FIRST)
+        self.assertIsNone(r.for_appearance('detached'))
+    def test_second_shell_becomes_ambiguous_when_it_publishes_a_route(self):
+        r=Routes(1,CREATED,[]);r.consume(loaded());r.consume(route())
+        r.consume(loaded(window=3));r.consume(route('/local/'+SECOND,window=3))
+        self.assertIsNone(r.for_appearance('primary'))
+    def test_quoted_lifecycle_text_cannot_supply_a_route(self):
+        r=Routes(1,CREATED,[]);r.consume(loaded())
+        r.consume('2026-01-01T00:00:02.000Z info [other] quoted '+route())
+        self.assertFalse(r.routes)
+    def test_route_without_verified_appearance_is_not_used(self):
+        r=Routes(1,CREATED,[]);r.consume(route())
+        self.assertIsNone(r.for_appearance('primary'))
     def test_primary_and_avatar_routes_stay_separate(self):
         r=Routes(1,CREATED,[]);r.consume(loaded());r.consume(route())
         r.consume(loaded('avatarOverlay',2));r.consume(route('/dots/'+SECOND,2))
@@ -166,6 +182,24 @@ class NativeObservationTests(unittest.TestCase):
             self.assertFalse(self.n.observe())
     def test_close_is_idempotent(self):
         self.n.close();self.n.close();self.reader.close.assert_called_once()
+    def test_transient_snapshot_failure_keeps_incremental_route_reader(self):
+        self.n.observe()
+        self.reader.read.side_effect=[OSError('invalidated element'),self.view]
+        with patch('session_model_usage.diagnostics.record') as record:
+            self.assertFalse(self.n.observe())
+            record.assert_called_once()
+        self.assertIs(self.n.routes,self.r)
+        self.assertFalse(self.n.connection_failed)
+        self.assertEqual(self.n.observe()[0].data['threadId'],FIRST)
+        self.reader.close.assert_not_called()
+    def test_auxiliary_snapshot_failure_does_not_block_confirmed_host(self):
+        self.reader.read.side_effect=[OSError('auxiliary element'),self.view]
+        with patch('session_model_usage.native.visible_app_windows',return_value=[{**self.window,'hwnd':102},self.window]),patch('session_model_usage.diagnostics.record'):
+            self.assertEqual(self.n.observe()[0].data['nativeHwnd'],101)
+    def test_missing_geometry_has_specific_reason_and_hides_previous_view(self):
+        self.n.observe();self.reader.read.return_value=None
+        self.assertFalse(self.n.observe())
+        self.assertIn('输入栏辅助功能',self.n.problem)
 
 
 class IndependentLaunchTests(unittest.TestCase):
