@@ -9,19 +9,21 @@ from functools import wraps
 from concurrent.futures import ThreadPoolExecutor
 
 import psutil
-from PySide6.QtCore import Qt, QThread, Signal, QPointF, QRectF
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QPen
+from PySide6.QtCore import Qt, QThread, QTimer, Signal, QPointF, QRectF, QEvent
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPixmap, QPen, QRegion
 from PySide6.QtWidgets import (QApplication, QFrame, QLabel, QMenu, QPushButton,
-    QSystemTrayIcon, QScrollArea, QStackedWidget, QButtonGroup, QGraphicsDropShadowEffect,
+    QSystemTrayIcon, QScrollArea, QStackedWidget, QButtonGroup,
     QVBoxLayout, QHBoxLayout, QWidget, QSizePolicy)
 
 from .accounting import UsageService
 from .diagnostics import record
+from .glass import apply_glass, read_glass_settings
+from .appearance import palette as interface_palette, rgb as color_rgb
 from .runtime_io import atomic_json
 from .cdp import (Inspector, anchor_physical, bind_window, compact_tokens,
                   details_rectangle, toolbar_gap_physical)
 from .platform_win import (alive, client_geometry, foreground_info, position_without_focus,
-    read_state, set_no_activate, state_directory, write_state, visible_app_windows, attach_to_window)
+    read_state, set_no_activate, state_directory, write_state, visible_app_windows, attach_to_window, mouse_press_state)
 
 
 def icon(dark: bool = True) -> QIcon:
@@ -35,14 +37,6 @@ def icon(dark: bool = True) -> QIcon:
     painter.drawText(pixmap.rect(), Qt.AlignmentFlag.AlignCenter, "Σ")
     painter.end()
     return QIcon(pixmap)
-
-
-PALETTES = {
-    True: {"surface": "#242426", "card": "#2F2F32", "text": "#F5F5F7",
-           "muted": "#A1A1A8", "edge": "#414145", "accent": "#0A84FF", "segment": "#37373B"},
-    False: {"surface": "#FBFBFD", "card": "#FFFFFF", "text": "#1D1D1F",
-            "muted": "#6E6E73", "edge": "#DEDEE3", "accent": "#007AFF", "segment": "#EFEFF3"},
-}
 
 
 def label(text: str = "", name: str = "") -> QLabel:
@@ -81,13 +75,16 @@ class Badge(QPushButton):
         self._dark = True
         self.snapshot = None
         self.display = ""
+        self.compact = False
         self.update_usage(None)
         self.fit_to_gap(400, 28)
         set_no_activate(int(self.winId()))
 
     def theme(self, dark: bool) -> None:
-        if self._dark != dark:
+        colors = interface_palette(dark)
+        if self._dark != dark or getattr(self, '_colors', None) != colors:
             self._dark = dark
+            self._colors = colors
             self.update()
 
     def update_usage(self, snapshot: dict | None) -> None:
@@ -105,10 +102,21 @@ class Badge(QPushButton):
         self.setFont(font)
         total = self.snapshot.get("totals") if self.snapshot else None
         value = compact_tokens(total["total_tokens"] if total else None)
-        options = [f"本会话  {value} tokens", f"{value} tokens"]
-        for text in options:
-            desired = self.fontMetrics().horizontalAdvance(text) + 46
+        # Micro's narrow composer can leave less than 100 physical pixels.
+        # Keep the full meaning in the tooltip/accessibility name while the
+        # smallest badge shows the abbreviated total without overlapping UI.
+        options = [f"本会话  {value} tokens", f"{value} tokens", f"Σ {value}", value]
+        if total:
+            amount = total['total_tokens']
+            for divisor, suffix in ((1_000_000_000, 'B'), (1_000_000, 'M'), (1_000, 'K')):
+                if amount >= divisor:
+                    options.extend(f"{amount / divisor:.{precision}f}{suffix}" for precision in (1, 0))
+                    break
+        for index, text in enumerate(options):
+            compact = index >= 2
+            desired = self.fontMetrics().horizontalAdvance(text) + (36 if compact else 46)
             if desired <= width:
+                self.compact = compact
                 self.display = text
                 self.setText(text)
                 self.setAccessibleName(f"本会话 {value} tokens，点击查看模型与推理强度")
@@ -120,7 +128,7 @@ class Badge(QPushButton):
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        colors = PALETTES[self._dark]
+        colors = getattr(self, '_colors', None) or interface_palette(self._dark)
         bg = colors["segment"] if self.underMouse() else colors["card"]
         p.setBrush(QColor(bg)); p.setPen(QPen(QColor(colors["edge"]), 1))
         p.drawRoundedRect(QRectF(self.rect()).adjusted(.5, .5, -.5, -.5), self.height()/2, self.height()/2)
@@ -128,11 +136,11 @@ class Badge(QPushButton):
         partial = self.snapshot and self.snapshot.get("status") == "partial"
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(colors["muted"] if pending else "#FF9F0A" if partial else colors["accent"]))
-        p.drawEllipse(QPointF(13, self.height()/2), 2.5, 2.5)
+        p.drawEllipse(QPointF(10 if self.compact else 13, self.height()/2), 2.5, 2.5)
         p.setFont(self.font()); p.setPen(QColor(colors["text"]))
-        p.drawText(self.rect().adjusted(24, 0, -22, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.display)
+        p.drawText(self.rect().adjusted(18 if self.compact else 24, 0, -18 if self.compact else -22, 0), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.display)
         p.setPen(QPen(QColor(colors["muted"]), 1.3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
-        x, y = self.width()-13, self.height()/2
+        x, y = self.width()-(9 if self.compact else 13), self.height()/2
         p.drawLine(QPointF(x-3, y-1), QPointF(x, y+2))
         p.drawLine(QPointF(x, y+2), QPointF(x+3, y-1))
 
@@ -148,14 +156,19 @@ class ContributionBar(QWidget):
         super().__init__()
         self.setFixedHeight(3)
         self.share = 1.0
+        self.main_color, self.child_color = QColor('#43C2DD'), QColor('#41AEEB')
+
+    def theme(self, colors: dict) -> None:
+        self.main_color, self.child_color = QColor(colors['accent']), QColor(colors['secondary'])
+        self.update()
 
     def paintEvent(self, event) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#BF5AF2"))
+        p.setBrush(self.child_color)
         p.drawRoundedRect(self.rect(), 1.5, 1.5)
-        p.setBrush(QColor("#0A84FF"))
+        p.setBrush(self.main_color)
         p.drawRoundedRect(QRectF(0, 0, self.width()*self.share, self.height()), 1.5, 1.5)
 
 
@@ -264,6 +277,8 @@ class CardList(QScrollArea):
 
 
 class Details(QFrame):
+    CORNER_RADIUS = 8
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Codex 会话用量明细")
@@ -273,10 +288,10 @@ class Details(QFrame):
         self.setFont(QFont("Segoe UI Variable Text", 9))
         self.resize(760, 510)
         self._dark = None
-        outer = QVBoxLayout(self); outer.setContentsMargins(8, 8, 8, 8)
+        self._material_key = None
+        self.native_material = "unavailable"
+        outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0)
         self.panel = QFrame(); self.panel.setObjectName("panel"); outer.addWidget(self.panel)
-        shadow = QGraphicsDropShadowEffect(self.panel); shadow.setBlurRadius(18); shadow.setOffset(0, 3)
-        shadow.setColor(QColor(0, 0, 0, 55)); self.panel.setGraphicsEffect(shadow)
         layout = QVBoxLayout(self.panel); layout.setContentsMargins(18, 14, 18, 14); layout.setSpacing(12)
         header = QVBoxLayout(); header.setSpacing(4)
         top = QHBoxLayout()
@@ -308,15 +323,99 @@ class Details(QFrame):
         layout.addWidget(self.warning)
         self.theme(True)
         set_no_activate(int(self.winId()))
+        self.material_timer = QTimer(self)
+        self.material_timer.setInterval(750)
+        self.material_timer.timeout.connect(self.refresh_material)
+        self.dismiss_anchor = None
+        self._click_buttons = 0
+        self.dismiss_timer = QTimer(self)
+        self.dismiss_timer.setInterval(16)
+        self.dismiss_timer.timeout.connect(self.check_outside_click)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.refresh_material(force=True)
+        self.material_timer.start()
+        self._click_buttons, _ = mouse_press_state()
+        QApplication.instance().installEventFilter(self)
+        self.dismiss_timer.start()
+
+    def hideEvent(self, event) -> None:
+        self.material_timer.stop()
+        self.dismiss_timer.stop()
+        QApplication.instance().removeEventFilter(self)
+        super().hideEvent(event)
+
+    def eventFilter(self, watched, event) -> bool:
+        if self.isVisible() and event.type() == QEvent.Type.MouseButtonPress and isinstance(watched, QWidget):
+            if watched.window() not in (self, self.dismiss_anchor):
+                self.hide()
+        return super().eventFilter(watched, event)
+
+    def check_outside_click(self) -> None:
+        self.outside_click_sample(*mouse_press_state())
+
+    def outside_click_sample(self, buttons: int, root: int) -> None:
+        pressed = buttons & ~self._click_buttons
+        self._click_buttons = buttons
+        inside = {int(self.winId())}
+        if self.dismiss_anchor and self.dismiss_anchor.isVisible():
+            inside.add(int(self.dismiss_anchor.winId()))
+        if self.isVisible() and pressed and root not in inside:
+            self.hide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._material_key:
+            self.clip_glass()
+
+    def clip_glass(self) -> None:
+        # A hard window region prevents DWM's backdrop rounding. Qt's panel alpha
+        # paints the same curve; use a region only for the non-blurred fallback.
+        self.layout().activate()
+        if self.native_material.startswith("rounded-"):
+            self.clearMask()
+            return
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.panel.geometry()), self.CORNER_RADIUS, self.CORNER_RADIUS)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
 
     def theme(self, dark: bool) -> None:
         if self._dark == dark:
             return
         self._dark = dark
-        c = PALETTES[dark]
+        self.refresh_material()
+
+    def refresh_material(self, *, force: bool = False) -> None:
+        settings = read_glass_settings()
+        colors = interface_palette(self._dark)
+        key = (self._dark, settings, tuple(colors.items()))
+        if not force and key == self._material_key:
+            return
+        self._material_key = key
+        dark = colors.pop('dark')
+        c = colors
+        if settings.enabled:
+            shade = color_rgb(c['surface'])
+            alpha = round(settings.opacity * 255 / 100)
+            def rgba(rgb, opacity):
+                return f"rgba({rgb[0]}, {rgb[1]}, {rgb[2]}, {opacity / 255:.5f})"
+            c.update(surface=f"qlineargradient(x1:0, y1:0, x2:1, y2:1, "
+                     f"stop:0 {rgba(shade, min(255, alpha + 8))}, stop:1 {rgba(shade, alpha)})",
+                     card=f"qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {rgba(color_rgb(c['accent']), 26 if dark else 34)}, "
+                          f"stop:1 {rgba(color_rgb(c['secondary']), 12 if dark else 20)})",
+                     segment=rgba(color_rgb(c['accent']), 24 if dark else 16),
+                     edge=rgba(color_rgb(c['accent']), 60 if dark else 65),
+                     muted="#D1D8DE" if dark else "#3B4D59")
+        # Offscreen previews have no HWND and only render the translucent Qt layers.
+        if QApplication.platformName() == "windows":
+            self.clearMask()
+            self.native_material = apply_glass(int(self.winId()), settings)
+            record("details_material", enabled=settings.enabled, opacity=settings.opacity,
+                   native_material=self.native_material)
         self.setStyleSheet(f"""
             QWidget {{ color:{c['text']}; font-family:'Segoe UI Variable Text','Microsoft YaHei UI'; font-size:12px; }}
-            QFrame#panel {{ background:{c['surface']}; border:1px solid {c['edge']}; border-radius:18px; }}
+            QFrame#panel {{ background:{c['surface']}; border:1px solid {c['edge']}; border-radius:{self.CORNER_RADIUS}px; }}
             QLabel {{ background:transparent; border:0; }}
             QLabel#title {{ font-size:14px; font-weight:600; }}
             QLabel#total {{ font-family:'Segoe UI Variable Display'; font-size:32px; font-weight:600; }}
@@ -331,7 +430,7 @@ class Details(QFrame):
             QLabel#cardTotal {{ font-size:19px; font-weight:600; }}
             QLabel#metricValue {{ font-size:18px; font-weight:500; }}
             QLabel#mainSource {{ color:{c['accent']}; font-size:11px; }}
-            QLabel#childSource {{ color:{'#D494FA' if dark else '#9047BC'}; font-size:11px; }}
+            QLabel#childSource {{ color:{c['secondary']}; font-size:11px; }}
             QFrame#segments {{ background:{c['segment']}; border:0; border-radius:9px; }}
             QPushButton#segment {{ background:transparent; color:{c['muted']}; border:0; border-radius:6px; padding:5px; }}
             QPushButton#segment:checked {{ background:{c['card']}; color:{c['text']}; font-weight:600; }}
@@ -344,6 +443,10 @@ class Details(QFrame):
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height:0; }}
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background:transparent; }}
         """)
+        self.clip_glass()
+        self._colors = c
+        for card in self.models.cards:
+            card.bar.theme(c)
 
     def update_usage(self, snapshot: dict | None, thread_id: str | None) -> None:
         total = snapshot.get("totals") if snapshot else None
@@ -358,6 +461,8 @@ class Details(QFrame):
             for group in model.get('configurations') or model.get("reasoning_efforts") or [{**model, "reasoning_effort": None}]:
                 entries.append({**group, "model": model["model"]})
         self.models.update_usage(entries, [(e["model"], e["reasoning_effort"], e.get('service_tier')) for e in entries])
+        for card in self.models.cards:
+            card.bar.theme(self._colors)
         threads = snapshot.get("threads", []) if snapshot else []
         self.threads.update_usage(threads, [e["thread_id"] for e in threads])
         warnings = snapshot.get("warnings", []) if snapshot else []
@@ -446,6 +551,8 @@ class Observer(QThread):
                         self.stop_event.wait(min(0.5, next_connect - start))
                         continue
                     observations = inspector.observe()
+                    if hasattr(inspector, 'compatibility'):
+                        state['compatibility'] = inspector.compatibility()
                     if not observations and inspector.connection_failed:
                         raise RuntimeError('界面调试目标暂时断开')
                     connection_attempt = 0
@@ -457,20 +564,24 @@ class Observer(QThread):
                         geometry = client_geometry(self.last_hwnd)
                         if geometry:
                             thread_id = current.data["threadId"]
+                            view_key = current.data.get("viewKey", thread_id)
                             self.last_target = current.target_id
                             data = {**current.data, "client_origin": geometry[0], "client_size": geometry[1],
                                     "native_scale": window["scale"], "host_hwnd": self.last_hwnd}
                             state.update(overlay_visible=False, badge_rect=None)
                             self.observation.emit(data)
-                            state.update(thread_id=thread_id, status="connected", host_hwnd=self.last_hwnd,
-                                         message="自动跟随当前会话" if hwnd == self.last_hwnd else "Codex 在后台，继续跟随当前会话")
+                            state.update(thread_id=thread_id, view_key=view_key, status="connected", host_hwnd=self.last_hwnd,
+                                         message=("新会话已连接，等待请求用量记录" if not thread_id else
+                                             "自动跟随当前会话" if hwnd == self.last_hwnd else "Codex 在后台，继续跟随当前会话"))
                             placement = self.placement
-                            if placement.get("thread_id") == thread_id:
+                            if placement.get("view_key", placement.get("thread_id")) == view_key:
                                 state.update(overlay_visible=placement["visible"],
                                              badge_rect=placement.get("rect"))
                                 if placement.get("message"):
                                     state.update(status="placement_unavailable", message=placement["message"])
-                            if pending is None and (thread_id != last_thread or start - last_usage >= 1):
+                            if not thread_id:
+                                last_thread = None
+                            elif pending is None and (thread_id != last_thread or start - last_usage >= 1):
                                 pending = pool.submit(service.query, thread_id)
                                 last_thread, last_usage = thread_id, start
                         else:
@@ -513,7 +624,7 @@ def guarded_ui(method):
             return method(self, *arguments)
         except Exception as error:
             record('overlay_callback_failed', error, callback=method.__name__)
-            self.data = self.current = self.usage = None
+            self.data = self.current = self.usage = self.view_key = None
             self.badge.hide()
             self.details.hide()
             self.worker.placement = {'visible': False, 'thread_id': None, 'message': '界面暂不可用，正在重新识别'}
@@ -524,10 +635,13 @@ class Overlay:
     def __init__(self, app: QApplication, port: int, app_pid: int, run_id: str, attachment_id: str | None = None):
         self.app = app
         self.badge, self.details = Badge(), Details()
+        self.details.dismiss_anchor = self.badge
         self.current = None
+        self.view_key = None
         self.usage = None
         self.data = None
-        self.badge.clicked.connect(self.toggle_details)
+        # Toggle on press so the close cannot be undone by a later release.
+        self.badge.pressed.connect(self.toggle_details)
         self.tray = QSystemTrayIcon(icon(), app)
         menu = QMenu()
         self.state_action = menu.addAction("正在连接 Codex…"); self.state_action.setEnabled(False)
@@ -554,9 +668,12 @@ class Overlay:
         self.data = data
         if not data:
             self.current = self.usage = None
+            self.view_key = None
             self.worker.placement = {"visible": False, "thread_id": None, "message": ""}
             self.badge.hide(); self.details.hide(); return
-        if self.current != data["threadId"]:
+        view_key = data.get("viewKey", data["threadId"])
+        if self.view_key != view_key:
+            self.view_key = view_key
             self.current = data["threadId"]
             self.usage = None
             self.details.hide()
@@ -568,28 +685,30 @@ class Overlay:
         problem = ("无法识别权限与背景信息控件的位置，已暂停悬浮条定位" if not gap else
                    "输入栏控件之间的空间不足，请增大窗口宽度")
         if not gap or not self.badge.fit_to_gap(int(gap[2] / scale), int(gap[3] / scale)):
-            self.worker.placement = {"visible": False, "thread_id": self.current, "message": problem}
+            self.worker.placement = {"visible": False, "thread_id": self.current, "view_key": view_key, "message": problem}
             self.tray.setToolTip(problem)
             self.badge.hide(); self.details.hide(); return
         size = (round(self.badge.width() * scale), round(self.badge.height() * scale))
         position = anchor_physical(data, data["client_origin"], data["client_size"], size)
         if position is None or position[1] < data["client_origin"][1] or size[0] > data["client_size"][0]:
-            self.worker.placement = {"visible": False, "thread_id": self.current, "message": problem}
+            self.worker.placement = {"visible": False, "thread_id": self.current, "view_key": view_key, "message": problem}
             self.badge.hide(); self.details.hide(); return
         attach_to_window(int(self.badge.winId()), data["host_hwnd"])
         if not self.badge.isVisible():
             self.badge.show()
         position_without_focus(int(self.badge.winId()), *position, *size, owner=data["host_hwnd"])
-        self.worker.placement = {"visible": True, "thread_id": self.current, "message": "",
+        self.worker.placement = {"visible": True, "thread_id": self.current, "view_key": view_key, "message": "",
                                  "rect": [*position, *size]}
         if self.details.isVisible():
             self.place_details(position, scale)
 
     @guarded_ui
     def update_usage(self, usage: dict) -> None:
-        if usage["thread_id"] != self.current:
+        if not self.current or usage["thread_id"] != self.current:
             return
         self.usage = usage
+        from .companion import publish_usage
+        publish_usage(usage, self.worker.run_id, self.worker.attachment_id)
         self.badge.update_usage(usage)
         self.details.update_usage(usage, self.current)
         if self.data:

@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +20,7 @@ FILES = ("README.md", "LICENSE", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md", "Inst
 UUID = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", re.I)
 USER_PATH = re.compile(r"[A-Za-z]:[/\\]Users[/\\][A-Za-z0-9_. -]+[/\\]", re.I)
 TOKEN = re.compile(r"(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{24,})")
-TEXT_SUFFIXES = {".py", ".md", ".json", ".toml", ".yml", ".yaml", ".ps1", ".cmd", ".spec", ".manifest", ".txt"}
+TEXT_SUFFIXES = {".py", ".cs", ".md", ".json", ".toml", ".yml", ".yaml", ".ps1", ".cmd", ".spec", ".manifest", ".txt"}
 
 
 def inspect_public_file(path: Path) -> None:
@@ -72,14 +73,25 @@ def main() -> int:
         return tests.returncode
     count = int(re.search(r"Ran (\d+) tests", test_output).group(1))
     print(f"Public source audit passed; {count} tests passed", flush=True)
+    from build_quota import build as build_native
+    native_tray = build_native()
     with (build/"build.log").open("w", encoding="utf-8") as log:
         subprocess.run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--distpath", str(build/"dist"),
                         "--workpath", str(build/"work"), str(ROOT/"source/build.spec")],
                         stdout=log, stderr=subprocess.STDOUT, check=True, env=environment, cwd=ROOT)
     runtime = build/"dist/runtime"
+    shutil.copy2(native_tray, runtime / native_tray.name)
     if any("plugin_tools" in p.parts for p in runtime.rglob("*")):
         raise RuntimeError("Development scaffolding must not be bundled")
     staging = build/"release/session-model-usage"
+    if staging.exists():
+        # Preserve the previous build, but never carry removed/renamed sources
+        # into the next installation directory.
+        prior = build/"release/history"/f"session-model-usage-{time.time_ns()}"
+        if staging.is_symlink() or not staging.resolve().is_relative_to(build.resolve()) or not prior.resolve().is_relative_to(build.resolve()):
+            raise RuntimeError("Release staging paths must stay within the build directory")
+        prior.parent.mkdir(parents=True, exist_ok=True)
+        staging.rename(prior)
     staging.mkdir(parents=True, exist_ok=True)
     staged = []
     for path in paths:
@@ -94,8 +106,10 @@ def main() -> int:
             shutil.copy2(path, destination)
             staged.append(destination)
     validation = staging/"validation-summary.json"
+    native_validation = json.loads((build/"quota/test-summary.json").read_text(encoding="utf-8"))
     validation.write_text(json.dumps({"version":version,"platform":"Windows x64",
         "python":platform.python_version(),"offline_tests_passed":count,
+        "native_checks":native_validation,
         "public_file_audit":"passed","no_validation_model_requests":True,
         "real_user_logs_included":False,"private_test_profiles_included":False},indent=2)+"\n",encoding="utf-8")
     staged.append(validation)

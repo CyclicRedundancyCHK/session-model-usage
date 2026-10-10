@@ -21,7 +21,7 @@ from .platform_win import (alive, debugging_port, find_app, free_port, hidden_st
 from .runtime_io import ProcessLock, read_json
 
 BACKOFF = (1, 2, 4, 8, 15)
-REPORT_FIELDS = ("status", "message", "thread_id", "overlay_visible", "badge_rect", "host_hwnd", "foreground_pid")
+REPORT_FIELDS = ("status", "message", "thread_id", "overlay_visible", "badge_rect", "host_hwnd", "foreground_pid", "compatibility")
 
 
 class Backend:
@@ -103,6 +103,7 @@ class Manager:
         self.state.update(thread_id=None, overlay_visible=False, badge_rect=None, host_hwnd=None)
 
     def publish(self):
+        self.state['attachment_id'] = self.attachment_id
         self.state['restart_armed'] = self.restart_armed
         self.state["heartbeat"] = time.time()
         self.state["worker_heartbeat"] = self.report().get("heartbeat") if self.worker else None
@@ -130,6 +131,7 @@ class Manager:
         if self.attachment_id:
             try:
                 (self.folder / f"observer-{self.attachment_id}.json").unlink(missing_ok=True)
+                (self.folder / f"usage-{self.attachment_id}.json").unlink(missing_ok=True)
             except OSError:
                 pass
         self.attachment_id = None
@@ -318,7 +320,7 @@ class Manager:
 
 
 def run_supervisor(run_id: str, open_requested=False) -> int:
-    from PySide6.QtCore import QThread, Signal
+    from PySide6.QtCore import QThread, Signal, QTimer
     from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
     from .overlay import icon
     from .controller import request
@@ -341,6 +343,14 @@ def run_supervisor(run_id: str, open_requested=False) -> int:
         menu.addAction("退出插件").triggered.connect(app.quit)
         tray.setContextMenu(menu)
         tray.show()
+        from .companion import Companion
+        companion = Companion(run_id)
+        frontend_timer = QTimer(app)
+        frontend_timer.setInterval(1000)
+        def update_frontend():
+            tray.setVisible(not companion.tick())
+        frontend_timer.timeout.connect(update_frontend)
+        frontend_timer.start()
         worker = Worker()
         notified_host = None
         def update(value):
@@ -359,6 +369,8 @@ def run_supervisor(run_id: str, open_requested=False) -> int:
         def close():
             manager.stop_event.set()
             worker.wait(8000)
+            frontend_timer.stop()
+            companion.close()
             tray.hide()
         app.aboutToQuit.connect(close)
         worker.start()

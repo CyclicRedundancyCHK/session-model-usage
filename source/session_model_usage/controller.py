@@ -37,6 +37,13 @@ def status() -> dict:
     elif not healthy:
         state.update(status="unresponsive", message="管理进程心跳已过期，请查看 diagnose",
                      thread_id=None, overlay_visible=False, badge_rect=None)
+    from .runtime_io import read_json
+    frontend = read_json(state_directory() / 'frontend.json')
+    if frontend.get('run_id') == state.get('run_id'):
+        heartbeat = frontend.get('heartbeat', 0)
+        frontend['healthy'] = (alive(frontend.get('pid'), frontend.get('created'))
+                               and isinstance(heartbeat, (int, float)) and 0 <= time.time() - heartbeat < 10)
+        state['frontend'] = frontend
     return {**state, "version": state.get("version", __version__), "running": running, "healthy": healthy}
 
 

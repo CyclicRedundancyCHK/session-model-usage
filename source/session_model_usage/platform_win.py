@@ -166,6 +166,26 @@ def foreground_info() -> tuple[int, int]:
     return int(window or 0), pid.value
 
 
+def mouse_press_state() -> tuple[int, int]:
+    """Button state and window under the pointer; never changes focus or input."""
+    if os.name != "nt":
+        return 0, 0
+    user = ctypes.windll.user32
+    user.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    user.GetAsyncKeyState.restype = ctypes.c_short
+    buttons = sum(bit for key, bit in ((1, 1), (2, 2), (4, 4))
+                  if user.GetAsyncKeyState(key) & 0x8000)
+    point = wintypes.POINT()
+    if not user.GetCursorPos(ctypes.byref(point)):
+        return buttons, 0
+    user.WindowFromPoint.argtypes = [wintypes.POINT]
+    user.WindowFromPoint.restype = wintypes.HWND
+    user.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    user.GetAncestor.restype = wintypes.HWND
+    root = user.GetAncestor(user.WindowFromPoint(point), 2)  # GA_ROOT
+    return buttons, int(root or 0)
+
+
 def client_geometry(hwnd: int) -> tuple[tuple[int, int], tuple[int, int]] | None:
     if os.name != "nt" or not hwnd:
         return None

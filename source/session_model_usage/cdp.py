@@ -8,11 +8,14 @@ import urllib.parse
 import urllib.request
 
 import websocket
+from .identity import ClientBindings
 
 
 READ_COMPOSER = r"""(() => {
   const parseThread = path => typeof path === 'string' ?
     path.match(/(?:^|\/)local\/([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})(?:\/|$|\?)/i)?.[1]?.toLowerCase() ?? null : null;
+  const parseDraft = path => typeof path === 'string' ?
+    path.match(/^\/local\/(client-new-thread:[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})(?:[/?#]|$)/i)?.[1]?.toLowerCase() ?? null : null;
   const candidates = Array.from(document.querySelectorAll('[data-codex-composer]'));
   const visible = candidates.map(el => ({el,
       rect: (el.closest('[data-codex-composer-root]') ?? el).getBoundingClientRect()}))
@@ -38,6 +41,8 @@ READ_COMPOSER = r"""(() => {
   }
   const threadId = route !== null ? parseThread(route) :
     parseThread(location.pathname) ?? parseThread(location.hash.replace(/^#/, ''));
+  const draftId = route !== null ? parseDraft(route) :
+    parseDraft(location.pathname) ?? parseDraft(location.hash.replace(/^#/, ''));
   const root = current?.el.closest('[data-codex-composer-root]');
   const rect = root?.getBoundingClientRect() ?? current?.rect;
   const packRect = el => {
@@ -64,7 +69,7 @@ READ_COMPOSER = r"""(() => {
   const dark = document.documentElement.classList.contains('dark') ||
     document.documentElement.dataset.theme === 'dark' || scheme === 'dark' ||
     (scheme !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
-  return {threadId, threadSource, focused: document.hasFocus(), dark,
+  return {threadId, viewKey: threadId ?? draftId, threadSource, focused: document.hasFocus(), dark,
     composer: rect ? {left:rect.left, top:rect.top, right:rect.right,
       bottom:rect.bottom, width:rect.width, height:rect.height} : null,
     toolbarGap, toolbarControls: {permissions:permissionRect,context:rightControls,model:modelRect},
@@ -122,7 +127,7 @@ class Observation:
 
 
 class Inspector:
-    def __init__(self, port: int):
+    def __init__(self, port: int, *, bindings=None):
         self.port = port
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self.connections: dict[str, CDPConnection] = {}
@@ -131,6 +136,7 @@ class Inspector:
         self.browser: CDPConnection | None = None
         self.problem = "正在识别 Codex 界面"
         self.connection_failed = False
+        self.client_bindings = bindings if bindings is not None else ClientBindings()
 
     def get_json(self, path: str) -> dict | list:
         with self.opener.open(f"http://127.0.0.1:{self.port}{path}", timeout=0.8) as response:
@@ -165,9 +171,13 @@ class Inspector:
                 if not data.get("composer"):
                     self.problem = "没有可见的输入栏，或此版本的输入栏标识已改变"
                     continue
-                if not data.get("threadId"):
+                if not data.get("threadId") and not (data.get("viewKey") or "").startswith("client-new-thread:"):
                     self.problem = "请打开本机 Codex 会话；当前输入栏没有可确认的 /local/ 会话路由"
                     continue
+                if not data.get('threadId'):
+                    thread = self.client_bindings.resolve(data.get('viewKey'))
+                    if thread:
+                        data = {**data, 'threadId': thread, 'viewKey': thread, 'threadSource': 'desktop_client_binding'}
                 result.append(Observation(key, data, self._bounds(key)))
             except Exception as error:
                 self.connection_failed = True
