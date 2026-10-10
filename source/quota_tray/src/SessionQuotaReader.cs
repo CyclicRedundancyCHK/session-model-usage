@@ -14,6 +14,7 @@ namespace CodexQuotaTray
         private const int MaximumFilesToInspect = 24;
         private const int MaximumActivityFiles = 300;
         private const int TailBytes = 768 * 1024;
+        private static readonly object QuotaProcessStartLock = new object();
         private readonly string _codexHome;
         private readonly Func<bool> _processDetector;
         private readonly string _liveQuotaHistoryPath;
@@ -354,23 +355,28 @@ namespace CodexQuotaTray
                         CreateNoWindow = true,
                         RedirectStandardInput = true,
                         RedirectStandardOutput = true,
-                        RedirectStandardError = true
+                        RedirectStandardError = true,
+                        StandardOutputEncoding = new UTF8Encoding(false),
+                        StandardErrorEncoding = new UTF8Encoding(false)
                     };
-                    if (!process.Start()) return null;
+                    if (!StartQuotaProcess(process)) return null;
+                    StreamWriter input = null;
                     try
                     {
                         process.StandardError.ReadToEndAsync();
-                        process.StandardInput.AutoFlush = true;
-                        process.StandardInput.WriteLine("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"codex-session-usage\",\"version\":\"0.2.0\"},\"capabilities\":{}}}");
+                        // Framework defaults inherit the console encoding, whose
+                        // UTF-8 preamble is not a valid JSON-RPC message prefix.
+                        input = new StreamWriter(process.StandardInput.BaseStream, new UTF8Encoding(false)) { AutoFlush = true };
+                        input.WriteLine("{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"codex-session-usage\",\"version\":\"0.2.0\"},\"capabilities\":{}}}");
                         if (ReadAppServerResponse(process, 1, 2500) == null) return null;
 
-                        process.StandardInput.WriteLine("{\"method\":\"initialized\"}");
-                        process.StandardInput.WriteLine("{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":{\"excludeResetCreditDetails\":true,\"supportsLunaReserve\":true}}");
+                        input.WriteLine("{\"method\":\"initialized\"}");
+                        input.WriteLine("{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":{\"excludeResetCreditDetails\":true,\"supportsLunaReserve\":true}}");
                         // An isolated server also performs its own account setup.
                         var response = ReadAppServerResponse(process, 2, 10000);
                         if (response != null && response.IndexOf("\"error\"", StringComparison.Ordinal) >= 0)
                         {
-                            process.StandardInput.WriteLine("{\"id\":3,\"method\":\"account/rateLimits/read\",\"params\":{}}");
+                            input.WriteLine("{\"id\":3,\"method\":\"account/rateLimits/read\",\"params\":{}}");
                             response = ReadAppServerResponse(process, 3, 4000);
                         }
                         QuotaSnapshot snapshot;
@@ -378,7 +384,7 @@ namespace CodexQuotaTray
                     }
                     finally
                     {
-                        try { process.StandardInput.Close(); }
+                        try { if (input != null) input.Close(); else process.StandardInput.Close(); }
                         catch { }
                         try
                         {
@@ -391,6 +397,23 @@ namespace CodexQuotaTray
             catch
             {
                 return null;
+            }
+        }
+
+        private static bool StartQuotaProcess(Process process)
+        {
+            // Framework writes the inherited stdin preamble during Start(),
+            // before a replacement writer can use the underlying pipe.
+            lock (QuotaProcessStartLock)
+            {
+                var previous = Console.InputEncoding;
+                if (previous.GetPreamble().Length == 0) return process.Start();
+                try
+                {
+                    Console.InputEncoding = new UTF8Encoding(false);
+                    return process.Start();
+                }
+                finally { Console.InputEncoding = previous; }
             }
         }
 

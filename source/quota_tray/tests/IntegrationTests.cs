@@ -51,9 +51,9 @@ internal static class IntegrationTests
         state["attachment_id"] = "different";
         Assert(!CompanionBridge.ParseSession(state, envelope, "test", 101).Total.HasValue, "attachment isolation");
         Assert(CompanionBridge.Parse("bad") == null, "malformed IPC");
-        var update = "{\"tag_name\":\"v0.2.3\",\"html_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.3\",\"assets\":[{\"name\":\"session-model-usage-v0.2.3-windows-x64.zip\",\"browser_download_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/download/v0.2.3/session-model-usage-v0.2.3-windows-x64.zip\"}]}";
+        var update = "{\"tag_name\":\"v0.2.4\",\"html_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.4\",\"assets\":[{\"name\":\"session-model-usage-v0.2.4-windows-x64.zip\",\"browser_download_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/download/v0.2.4/session-model-usage-v0.2.4-windows-x64.zip\"}]}";
         Assert(CombinedUpdateService.Parse(update).Newer, "complete combined update accepted");
-        Assert(!CombinedUpdateService.Parse(update.Replace("v0.2.3", "v0.2.2")).Newer, "current stable version is up to date");
+        Assert(!CombinedUpdateService.Parse(update.Replace("v0.2.4", "v0.2.3")).Newer, "current stable version is up to date");
         Assert(!CombinedUpdateService.Parse(update.Replace("CyclicRedundancyCHK/session-model-usage", "SYD-Official/CodexQuotaTray")).Newer, "upstream quota-only update rejected");
         Assert(!CombinedUpdateService.Parse(update.Replace(".zip", ".exe")).Newer, "quota-only executable rejected");
         Assert(!CombinedUpdateService.Parse(update.Replace("\"tag_name\"", "\"draft\":true,\"tag_name\"")).Newer, "draft rejected");
@@ -184,14 +184,22 @@ internal static class IntegrationTests
         var transcript = Path.Combine(directory, "transcript.json");
         var previousCli = Environment.GetEnvironmentVariable("SESSION_USAGE_QUOTA_CLI");
         var previousTranscript = Environment.GetEnvironmentVariable("SESSION_USAGE_TEST_QUOTA_TRANSCRIPT");
+        var previousInputEncoding = Console.InputEncoding;
         try
         {
+            // UTF-8 consoles on CI must not inject a BOM into JSON-RPC stdin.
+            Console.InputEncoding = new UTF8Encoding(true);
             Environment.SetEnvironmentVariable("SESSION_USAGE_QUOTA_CLI", Process.GetCurrentProcess().MainModule.FileName);
             Environment.SetEnvironmentVariable("SESSION_USAGE_TEST_QUOTA_TRANSCRIPT", transcript);
             var result = new SessionQuotaReader(directory, () => true).ReadLatest();
+            if (!result.IsLiveQuota)
+                Console.Error.WriteLine("Quota fixture: {0}; transcript={1}", result.Error,
+                    File.Exists(transcript) ? File.ReadAllText(transcript) : "missing");
             Assert(result.IsLiveQuota && result.Snapshot.FiveHourWindow.RemainingPercent == 88 &&
                 result.Snapshot.WeeklyWindow.RemainingPercent == 66,
                 "colliding server question IDs must not finish the quota read or suppress the real response");
+            Assert(Console.InputEncoding.CodePage == 65001 && Console.InputEncoding.GetPreamble().Length == 3,
+                "quota process launch restores the caller's console encoding");
             var data = CompanionBridge.Read(transcript);
             var arguments = ((object[])data["arguments"]).Select(item => item.ToString()).ToArray();
             var disabled = Array.IndexOf(arguments, "--disable");
@@ -206,6 +214,7 @@ internal static class IntegrationTests
         {
             Environment.SetEnvironmentVariable("SESSION_USAGE_QUOTA_CLI", previousCli);
             Environment.SetEnvironmentVariable("SESSION_USAGE_TEST_QUOTA_TRANSCRIPT", previousTranscript);
+            Console.InputEncoding = previousInputEncoding;
             var fullDirectory = Path.GetFullPath(directory);
             var temporaryRoot = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
             if (!fullDirectory.StartsWith(temporaryRoot, StringComparison.OrdinalIgnoreCase))
