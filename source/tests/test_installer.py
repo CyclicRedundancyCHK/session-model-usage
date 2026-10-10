@@ -47,7 +47,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[0].args[0][:4],["codex.exe","plugin","marketplace","add"])
         self.assertEqual(run.call_args_list[1].args[0],["codex.exe","plugin","add","session-model-usage@session-model-usage"])
         entry=json.loads((self.destination/".agents/plugins/marketplace.json").read_text(encoding="utf-8"))
-        self.assertEqual(Path(entry["plugins"][0]["source"]["path"]),self.destination.resolve())
+        self.assertEqual(entry["plugins"][0]["source"]["path"],"./")
 
     def test_unrelated_personal_marketplace_is_unchanged(self):
         path=self.home/".agents/plugins/marketplace.json"
@@ -90,7 +90,14 @@ class InstallerTests(unittest.TestCase):
         path=installer.write_local_marketplace(self.source)
         value=json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(len(value["plugins"]),1)
-        self.assertEqual(value["plugins"][0]["source"]["path"],str(self.source.resolve()))
+        self.assertEqual((self.source/value["plugins"][0]["source"]["path"]).resolve(),self.source.resolve())
+
+    def test_fresh_install_keeps_installation_entry_points(self):
+        for name in ('Install.ps1', '安装插件.cmd', '启动悬浮条.cmd'):
+            (self.source/name).write_text('fixture entry point', encoding='utf-8')
+        self.run_install()
+        for name in ('Install.ps1', '安装插件.cmd', '启动悬浮条.cmd'):
+            self.assertEqual((self.destination/name).read_text(encoding='utf-8'), 'fixture entry point')
 
 
 if __name__ == "__main__":

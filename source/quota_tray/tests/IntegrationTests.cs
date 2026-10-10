@@ -51,9 +51,9 @@ internal static class IntegrationTests
         state["attachment_id"] = "different";
         Assert(!CompanionBridge.ParseSession(state, envelope, "test", 101).Total.HasValue, "attachment isolation");
         Assert(CompanionBridge.Parse("bad") == null, "malformed IPC");
-        var update = "{\"tag_name\":\"v0.2.4\",\"html_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.4\",\"assets\":[{\"name\":\"session-model-usage-v0.2.4-windows-x64.zip\",\"browser_download_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/download/v0.2.4/session-model-usage-v0.2.4-windows-x64.zip\"}]}";
+        var update = "{\"tag_name\":\"v0.2.5\",\"html_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.5\",\"assets\":[{\"name\":\"session-model-usage-v0.2.5-windows-x64.zip\",\"browser_download_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/download/v0.2.5/session-model-usage-v0.2.5-windows-x64.zip\"}]}";
         Assert(CombinedUpdateService.Parse(update).Newer, "complete combined update accepted");
-        Assert(!CombinedUpdateService.Parse(update.Replace("v0.2.4", "v0.2.3")).Newer, "current stable version is up to date");
+        Assert(!CombinedUpdateService.Parse(update.Replace("v0.2.5", "v0.2.4")).Newer, "current version is up to date");
         Assert(!CombinedUpdateService.Parse(update.Replace("CyclicRedundancyCHK/session-model-usage", "SYD-Official/CodexQuotaTray")).Newer, "upstream quota-only update rejected");
         Assert(!CombinedUpdateService.Parse(update.Replace(".zip", ".exe")).Newer, "quota-only executable rejected");
         Assert(!CombinedUpdateService.Parse(update.Replace("\"tag_name\"", "\"draft\":true,\"tag_name\"")).Newer, "draft rejected");

@@ -2,18 +2,20 @@
 
 Windows 上统一的 Codex 会话统计与账号额度工具。结合 [CodexQuotaTray](https://github.com/SYD-Official/CodexQuotaTray) 的额度能力和本项目的会话、子智能体统计，用本项目独立设计的任务栏额度条和托盘概览，一个启动器与一个托盘入口同时提供两类功能。
 
-当前正式版本为 **0.2.3**，新增多模型 Fast 提交等级留存、完成会话移出最近列表后的提示清理，以及额度查询连接隔离与 UTF-8 管道兼容修复。右键菜单与最近会话菜单共用圆角主题样式，任务状态按 Err、Ask、Finish、Working 的优先级跨会话汇总。任务栏余额下方直接显示重置倒计时，保持原有尺寸；“显示 5 小时余额”开关同步控制 5 小时倒计时。最近会话菜单与输入栏 token 明细均支持再次点击入口或点击外部空白区域收起；任务栏悬停详情使用统一的圆角主题卡片。最近会话名称与 Codex 一致，最多 12 个字符，超出用省略号，不显示会话 ID。保留最近 6 个会话跳转、Micro 连续鼠标切换修复、Working / Ask / Finish / Err 状态提示和用量统计。完整 Windows 安装包及 SHA-256 校验文件见 [GitHub Release](https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.3)，也可从源码构建。
+当前正式版本为 **0.2.4**，修复新电脑安装时插件市场路径无法识别、首次安装失败后重试报“无法唯一确定现有插件市场”，以及 Windows 暂存目录短暂占用导致升级回滚的问题。保留多模型 Fast 提交等级留存、完成会话移出最近列表后的提示清理，以及额度查询连接隔离与 UTF-8 管道兼容修复。右键菜单与最近会话菜单共用圆角主题样式，任务状态按 Err、Ask、Finish、Working 的优先级跨会话汇总。任务栏余额下方直接显示重置倒计时，保持原有尺寸；“显示 5 小时余额”开关同步控制 5 小时倒计时。最近会话菜单与输入栏 token 明细均支持再次点击入口或点击外部空白区域收起；任务栏悬停详情使用统一的圆角主题卡片。最近会话名称与 Codex 一致，最多 12 个字符，超出用省略号，不显示会话 ID。保留最近 6 个会话跳转、Micro 连续鼠标切换修复、Working / Ask / Finish / Err 状态提示和用量统计。完整 Windows 安装包及 SHA-256 校验文件见 [GitHub Release](https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.4)，也可从源码构建。
 
 ![深色用量详情](assets/preview-dark.png)
 
 ## 安装
 
-1. 从 [GitHub Release](https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.3) 下载 `session-model-usage-v0.2.3-windows-x64.zip`。
+1. 从 [GitHub Release](https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.4) 下载 `session-model-usage-v0.2.4-windows-x64.zip`。
 2. 完整解压，保留 `runtime` 及其 `_internal` 文件夹。无需安装 Python。
 3. 双击 `安装插件.cmd`，再从 Windows 开始菜单打开 **Codex 会话用量**。
 4. 工具与 Codex 可以按任意顺序打开。通过官方图标启动 Codex 后，托盘工具会自动连接；关闭 Codex 后工具继续待机，重开后恢复。无需退出当前会话或更换官方图标。
 
 安装位置为 `%USERPROFILE%\plugins\session-model-usage`，通过 Codex CLI 注册本项目独立的插件市场，不修改其他插件的市场文件。已有用户双击安装脚本会自动升级：先备份、只停止本插件、保留原市场和快捷方式，注册失败时回滚。备份保留在个人插件目录的 `.session-model-usage-backups` 中。
+
+0.2.4 的安装器使用相对于本插件市场根目录的 `./` 路径。若旧安装留下本产品目录但没有注册记录，再次安装会先备份旧目录，再修复注册并创建快捷方式。已有注册记录按安装目录准确匹配；同一目录对应多个市场或本插件市场指向其他目录时仍停止并保留原文件。无需手工删除个人插件目录。
 
 首次安装后，插件技能在新的 Codex 会话中加载。也可直接打开 `runtime/CodexSessionUsage.exe` 启动伴随程序。
 
