@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Globalization;
@@ -20,6 +21,7 @@ internal static class IntegrationTests
     [STAThread]
     private static int Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "app-server") return FakeQuotaServer(args);
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
         try { return Run(args); }
         catch (Exception error)
@@ -49,9 +51,9 @@ internal static class IntegrationTests
         state["attachment_id"] = "different";
         Assert(!CompanionBridge.ParseSession(state, envelope, "test", 101).Total.HasValue, "attachment isolation");
         Assert(CompanionBridge.Parse("bad") == null, "malformed IPC");
-        var update = "{\"tag_name\":\"v0.2.2\",\"html_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.2\",\"assets\":[{\"name\":\"session-model-usage-v0.2.2-windows-x64.zip\",\"browser_download_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/download/v0.2.2/session-model-usage-v0.2.2-windows-x64.zip\"}]}";
+        var update = "{\"tag_name\":\"v0.2.3\",\"html_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.3\",\"assets\":[{\"name\":\"session-model-usage-v0.2.3-windows-x64.zip\",\"browser_download_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/download/v0.2.3/session-model-usage-v0.2.3-windows-x64.zip\"}]}";
         Assert(CombinedUpdateService.Parse(update).Newer, "complete combined update accepted");
-        Assert(!CombinedUpdateService.Parse(update.Replace("v0.2.2", "v0.2.1")).Newer, "current stable version is up to date");
+        Assert(!CombinedUpdateService.Parse(update.Replace("v0.2.3", "v0.2.2")).Newer, "current stable version is up to date");
         Assert(!CombinedUpdateService.Parse(update.Replace("CyclicRedundancyCHK/session-model-usage", "SYD-Official/CodexQuotaTray")).Newer, "upstream quota-only update rejected");
         Assert(!CombinedUpdateService.Parse(update.Replace(".zip", ".exe")).Newer, "quota-only executable rejected");
         Assert(!CombinedUpdateService.Parse(update.Replace("\"tag_name\"", "\"draft\":true,\"tag_name\"")).Newer, "draft rejected");
@@ -64,11 +66,13 @@ internal static class IntegrationTests
         VerifyTaskStates();
         VerifyTaskNavigation();
         VerifyRecentNavigation();
+        VerifyFinishEviction();
         VerifyPopupDismissalAndHover();
         VerifyStatusSettingsAndPalette();
         VerifyResetCountdown();
         VerifyGlobalTaskPriority();
         VerifyContextMenuTheme();
+        VerifyQuotaConnectionIsolation();
         Console.WriteLine("Combined bridge: {0} assertions passed", _count);
         if (args.Length > 0 && args[0] == "--live-task")
         {
@@ -124,6 +128,90 @@ internal static class IntegrationTests
             return result.IsLiveQuota ? 0 : 2;
         }
         return 0;
+    }
+
+    private static int FakeQuotaServer(string[] args)
+    {
+        var transcript = Environment.GetEnvironmentVariable("SESSION_USAGE_TEST_QUOTA_TRANSCRIPT");
+        var messages = new List<string>();
+        var serializer = new JavaScriptSerializer();
+        try
+        {
+            string line;
+            while ((line = Console.ReadLine()) != null)
+            {
+                messages.Add(line);
+                var request = CompanionBridge.Parse(line);
+                var method = CompanionBridge.Text(CompanionBridge.Get(request, "method"));
+                var id = CompanionBridge.Get(request, "id");
+                if (method == "initialize")
+                {
+                    // Server and client request IDs occupy separate namespaces.
+                    Console.WriteLine(serializer.Serialize(new { id = id, method = "item/tool/requestUserInput", @params = new { } }));
+                    Console.WriteLine(serializer.Serialize(new { id = id, result = new { } }));
+                }
+                else if (method == "account/rateLimits/read")
+                {
+                    Console.WriteLine(serializer.Serialize(new { id = id, method = "item/tool/requestUserInput", @params = new { } }));
+                    Console.Out.Flush();
+                    // Account setup in an isolated server can exceed the old 4s limit.
+                    System.Threading.Thread.Sleep(4200);
+                    Console.WriteLine(serializer.Serialize(new { id = id, result = new { rateLimits = new {
+                        limitId = "codex", primary = new { usedPercent = 12, windowDurationMins = 300 },
+                        secondary = new { usedPercent = 34, windowDurationMins = 10080 } } } }));
+                }
+                Console.Out.Flush();
+            }
+            return 0;
+        }
+        finally
+        {
+            File.WriteAllText(transcript, serializer.Serialize(new { arguments = args, messages = messages }), Encoding.UTF8);
+        }
+    }
+
+    private static void VerifyQuotaConnectionIsolation()
+    {
+        Assert(SessionQuotaReader.IsAppServerResponse("{\"id\":2,\"result\":null}", 2), "null RPC results remain valid responses");
+        Assert(SessionQuotaReader.IsAppServerResponse("{\"id\":2,\"error\":{\"code\":-32602}}", 2), "quota parameter errors remain available for the read-only fallback");
+        Assert(!SessionQuotaReader.IsAppServerResponse("{\"id\":2,\"method\":\"item/tool/requestUserInput\",\"result\":{}}", 2), "request envelopes cannot masquerade as quota replies");
+        Assert(!SessionQuotaReader.IsAppServerResponse("{\"id\":2}", 2) &&
+            !SessionQuotaReader.IsAppServerResponse("{\"id\":2,\"result\":{},\"error\":{}}", 2), "incomplete or conflicting response envelopes are ignored");
+        Assert(!SessionQuotaReader.IsAppServerResponse("{\"id\":3,\"result\":{}}", 2) &&
+            !SessionQuotaReader.IsAppServerResponse("not json", 2), "unrelated and malformed replies cannot finish the pending quota query");
+        var directory = Path.Combine(Path.GetTempPath(), "quota-protocol-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var transcript = Path.Combine(directory, "transcript.json");
+        var previousCli = Environment.GetEnvironmentVariable("SESSION_USAGE_QUOTA_CLI");
+        var previousTranscript = Environment.GetEnvironmentVariable("SESSION_USAGE_TEST_QUOTA_TRANSCRIPT");
+        try
+        {
+            Environment.SetEnvironmentVariable("SESSION_USAGE_QUOTA_CLI", Process.GetCurrentProcess().MainModule.FileName);
+            Environment.SetEnvironmentVariable("SESSION_USAGE_TEST_QUOTA_TRANSCRIPT", transcript);
+            var result = new SessionQuotaReader(directory, () => true).ReadLatest();
+            Assert(result.IsLiveQuota && result.Snapshot.FiveHourWindow.RemainingPercent == 88 &&
+                result.Snapshot.WeeklyWindow.RemainingPercent == 66,
+                "colliding server question IDs must not finish the quota read or suppress the real response");
+            var data = CompanionBridge.Read(transcript);
+            var arguments = ((object[])data["arguments"]).Select(item => item.ToString()).ToArray();
+            var disabled = Array.IndexOf(arguments, "--disable");
+            Assert(disabled >= 0 && disabled + 1 < arguments.Length && arguments[disabled + 1] == "daemon_auto_start",
+                "quota subprocess explicitly disables shared daemon auto-start before connecting");
+            var messages = ((object[])data["messages"]).Select(item => CompanionBridge.Parse(item.ToString())).ToArray();
+            Assert(messages.Select(item => CompanionBridge.Text(CompanionBridge.Get(item, "method")))
+                .SequenceEqual(new[] { "initialize", "initialized", "account/rateLimits/read" }),
+                "quota client only initializes and reads limits; it never answers or cancels incoming questions");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("SESSION_USAGE_QUOTA_CLI", previousCli);
+            Environment.SetEnvironmentVariable("SESSION_USAGE_TEST_QUOTA_TRANSCRIPT", previousTranscript);
+            var fullDirectory = Path.GetFullPath(directory);
+            var temporaryRoot = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            if (!fullDirectory.StartsWith(temporaryRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Quota fixture cleanup escaped its temporary directory");
+            Directory.Delete(fullDirectory, true);
+        }
     }
 
     private static string EventLine(DateTimeOffset stamp, string type, string extra)
@@ -211,6 +299,58 @@ internal static class IntegrationTests
         }
     }
 
+    private static void VerifyFinishEviction()
+    {
+        var now = DateTimeOffset.UtcNow.AddSeconds(-1);
+        const string first = "00000000-0000-0000-0000-000000000001";
+        const string seventh = "00000000-0000-0000-0000-000000000007";
+        const string error = "00000000-0000-0000-0000-000000000008";
+        const string ask = "00000000-0000-0000-0000-000000000009";
+        const string running = "00000000-0000-0000-0000-000000000010";
+        var monitor = new CodexTaskMonitor(null, null);
+        Func<string, string, int, string> line = (id, value, ms) => now.AddMilliseconds(ms).ToString("O") +
+            " info [desktop-notifications] " + value + " conversationId=" + id + " turnId=turn-1";
+        monitor.ProcessDesktopLine(line(first, "received turn-complete", 0));
+        monitor.ProcessDesktopLine(line(seventh, "received turn-complete", 0));
+        monitor.ProcessDesktopLine(line(ask, "received question requestId=question-1", 0));
+        monitor.ProcessDesktopLine(line(running, "Received turn/started", 0));
+        monitor.ProcessSessionLine(error, new JavaScriptSerializer().Serialize(new {
+            timestamp = now.ToString("O"), type = "event_msg", payload = new { type = "task_complete", status = "failed", turn_id = "turn-1" }
+        }));
+        var recent = new RecentThreadSnapshot { Available = true, CapturedAt = now.AddMilliseconds(100) };
+        for (var i = 1; i <= 6; i++) recent.Targets.Add(new TaskNavigationTarget {
+            ThreadId = "00000000-0000-0000-0000-" + i.ToString("D12") });
+        monitor.ReconcileRecent(recent);
+        var result = monitor.Snapshot();
+        Assert(result.FinishCount == 1 && result.Targets.Any(t => t.ThreadId == first) &&
+            !result.Targets.Any(t => t.ThreadId == seventh), "Finish evicted from newest six no longer sticks in the status strip");
+        Assert(result.ErrorCount == 1 && result.AskCount == 1 && result.WorkingCount == 1,
+            "recent-list eviction preserves errors, pending questions and running work outside the list");
+        monitor.ProcessDesktopLine(line(seventh, "received turn-complete", 0));
+        monitor.ReconcileRecent(recent);
+        Assert(monitor.Snapshot().FinishCount == 1, "duplicate completion does not restore an evicted Finish");
+        monitor.ProcessDesktopLine(line(seventh, "Received turn/started", 200).Replace("turn-1", "turn-2"));
+        monitor.ProcessDesktopLine(line(seventh, "received turn-complete", 300).Replace("turn-1", "turn-2"));
+        monitor.ReconcileRecent(recent);
+        Assert(monitor.Snapshot().FinishCount == 2, "older recent cache cannot clear a newer completion");
+        recent.Available = false; recent.CapturedAt = now.AddMilliseconds(400);
+        monitor.ReconcileRecent(recent);
+        Assert(monitor.Snapshot().FinishCount == 2, "unavailable recent list does not clear reminders");
+        recent.Available = true; recent.CapturedAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        monitor.ReconcileRecent(recent);
+        Assert(monitor.Snapshot().FinishCount == 2, "stale recent list does not clear reminders");
+        recent.CapturedAt = DateTimeOffset.UtcNow.AddMinutes(1);
+        monitor.ReconcileRecent(recent);
+        Assert(monitor.Snapshot().FinishCount == 2, "future recent list does not clear reminders");
+        recent.CapturedAt = now.AddMilliseconds(400);
+        monitor.ReconcileRecent(recent);
+        Assert(monitor.Snapshot().FinishCount == 1, "a fresh confirmed list consumes only the newly evicted completion");
+        recent.Targets.Clear();
+        monitor.ReconcileRecent(recent);
+        Assert(monitor.Snapshot().FinishCount == 0 && monitor.Snapshot().ErrorCount == 1,
+            "confirmed empty list clears remaining Finish while retaining errors");
+    }
+
     private static void VerifyRecentNavigation()
     {
         var recentFile = CompanionPaths.FilePath("recent-threads.json");
@@ -276,6 +416,10 @@ internal static class IntegrationTests
                 Assert(menu.Items.Count == 3 && menu.Items[2].Text == "暂无最近会话", "empty index is distinct from lookup failure");
             File.WriteAllText(recentFile, "bad");
             Assert(!CodexThreadNavigator.ReadRecent("recent-test").Available, "partial recent bridge is unavailable");
+            write("recent-test", 0, "complete", new { thread_id = first });
+            Assert(!CodexThreadNavigator.ReadRecent("recent-test").Available, "non-array recent data cannot clear Finish reminders");
+            write("recent-test", 0, "complete", new[] { new { thread_id = "invalid", title = "invalid" } });
+            Assert(!CodexThreadNavigator.ReadRecent("recent-test").Available, "invalid-only recent data is unavailable rather than empty");
             recent.Titles[first] = "添加最近会话弹出与打开";
             Assert(CodexThreadNavigator.MenuLabel(recent.Targets[0], recent.Titles) == "添加最近会话弹出与打开", "Codex display name stays unchanged within the limit");
             recent.Titles[first] = "一二三四五六七八九十一二";

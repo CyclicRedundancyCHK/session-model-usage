@@ -1,6 +1,6 @@
 {
   "name": "session-model-usage",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "统一查看 Codex 账号额度、会话和子智能体的模型 token 用量，提供任务栏数字条与输入栏悬浮条。",
   "author": {
     "name": "CyclicRedundancyCHK"

@@ -167,6 +167,7 @@ namespace CodexQuotaTray
                     var pid = (int)CompanionBridge.Number(CompanionBridge.Get(runtime, "app_pid"));
                     var started = new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero).AddSeconds(CompanionBridge.Number(CompanionBridge.Get(runtime, "app_created")));
                     status = _taskMonitor.Poll(enabled && CompanionBridge.DesktopRunning() == true, pid, started);
+                    _taskMonitor.ReconcileRecent(CodexThreadNavigator.ReadRecent(_runId));
                 }
                 catch { status = new TaskStatusSnapshot(); }
                 try

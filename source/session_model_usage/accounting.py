@@ -11,6 +11,7 @@ import sqlite3
 from typing import Any
 
 from .metadata import TurnMetadata, fields, fast_mode
+from .request_metadata import RequestMetadata
 
 
 TOKEN_FIELDS = ("input_tokens", "cached_input_tokens", "cache_write_input_tokens",
@@ -456,6 +457,7 @@ class UsageService:
         self.catalog_files: dict[Path, tuple[tuple, dict | None]] = {}
         self.catalog_paths: dict[Path, dict] = {}
         self.prefix_checks: dict[tuple, bool] = {}
+        self.request_metadata = RequestMetadata(self.home)
 
     def _history(self, path: Path, owner: str):
         try:
@@ -672,6 +674,7 @@ class UsageService:
                     parser.refresh()
                     entries, parser_warnings = parser.entries()
                     thread_warnings.extend(parser_warnings)
+                    thread_warnings.extend(self.request_metadata.fill(owner, entries))
                 except OSError as error:
                     thread_warnings.append(f"日志不可读取：{error.strerror or type(error).__name__}")
             else:
@@ -720,4 +723,4 @@ class UsageService:
                 "status": "partial" if warnings else "complete" if models else "pending",
                 "totals": asdict(totals) if models else None, "models": models, "threads": threads,
                 "warnings": sorted(set(warnings)),
-                "attribution": "模型、推理强度与服务等级以本地请求、轮次及明确设置或重路由记录为准；Fast 为请求设置，不代表服务端实际等级；缺失字段保留为 null"}
+                "attribution": "模型、推理强度与服务等级以本地请求、轮次及明确设置或重路由记录为准；JSONL 缺失的服务等级按相同会话和轮次的本地提交记录补齐；Fast 为请求设置，不代表服务端实际等级；缺失字段保留为 null"}

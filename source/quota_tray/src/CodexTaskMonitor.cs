@@ -154,6 +154,22 @@ namespace CodexQuotaTray
             }
         }
 
+        internal void ReconcileRecent(RecentThreadSnapshot recent)
+        {
+            if (recent == null || !recent.Available) return;
+            var age = DateTimeOffset.UtcNow - recent.CapturedAt;
+            if (age < TimeSpan.Zero || age >= TimeSpan.FromSeconds(30)) return;
+            var visible = new HashSet<string>(recent.Targets.Select(t => t.ThreadId), StringComparer.OrdinalIgnoreCase);
+            lock (this)
+                foreach (var pair in _tasks)
+                    if (pair.Value.State == CodexTaskState.Finish && pair.Value.Unread &&
+                        pair.Value.Updated <= recent.CapturedAt && !visible.Contains(pair.Key))
+                    {
+                        pair.Value.Unread = false;
+                        pair.Value.State = CodexTaskState.None;
+                    }
+        }
+
         internal TaskStatusSnapshot Snapshot()
         {
             lock (this)

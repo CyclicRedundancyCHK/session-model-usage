@@ -347,7 +347,9 @@ namespace CodexQuotaTray
                     process.StartInfo = new ProcessStartInfo
                     {
                         FileName = executable,
-                        Arguments = "app-server --stdio",
+                        // A short-lived quota client must not join the desktop's
+                        // shared daemon or participate in its pending requests.
+                        Arguments = "app-server --stdio --disable daemon_auto_start",
                         UseShellExecute = false,
                         CreateNoWindow = true,
                         RedirectStandardInput = true,
@@ -364,11 +366,12 @@ namespace CodexQuotaTray
 
                         process.StandardInput.WriteLine("{\"method\":\"initialized\"}");
                         process.StandardInput.WriteLine("{\"id\":2,\"method\":\"account/rateLimits/read\",\"params\":{\"excludeResetCreditDetails\":true,\"supportsLunaReserve\":true}}");
-                        var response = ReadAppServerResponse(process, 2, 4000);
+                        // An isolated server also performs its own account setup.
+                        var response = ReadAppServerResponse(process, 2, 10000);
                         if (response != null && response.IndexOf("\"error\"", StringComparison.Ordinal) >= 0)
                         {
                             process.StandardInput.WriteLine("{\"id\":3,\"method\":\"account/rateLimits/read\",\"params\":{}}");
-                            response = ReadAppServerResponse(process, 3, 2500);
+                            response = ReadAppServerResponse(process, 3, 4000);
                         }
                         QuotaSnapshot snapshot;
                         return TryParseAppServerRateLimitsResponse(response, out snapshot) ? snapshot : null;
@@ -404,19 +407,29 @@ namespace CodexQuotaTray
                 var line = read.Result;
                 if (line == null) return null;
 
-                try
-                {
-                    var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
-                    var root = serializer.DeserializeObject(line) as Dictionary<string, object>;
-                    long id;
-                    if (TryLong(Get(root, "id"), out id) && id == expectedId) return line;
-                }
-                catch
-                {
-                }
+                if (IsAppServerResponse(line, expectedId)) return line;
             }
 
             return null;
+        }
+
+        internal static bool IsAppServerResponse(string line, long expectedId)
+        {
+            try
+            {
+                var serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+                var root = serializer.DeserializeObject(line) as Dictionary<string, object>;
+                // Incoming requests have their own IDs and can collide with ours.
+                // Notifications and requests must never complete a quota read.
+                if (root == null || root.ContainsKey("method") ||
+                    root.ContainsKey("result") == root.ContainsKey("error")) return false;
+                long id;
+                return TryLong(Get(root, "id"), out id) && id == expectedId;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         private static string ResolveCodexExecutable()

@@ -178,7 +178,7 @@ class ActivityService:
 
 class Companion:
     """Frontend lifecycle stays separate from the Codex observer heartbeat."""
-    def __init__(self, run_id: str, folder=None):
+    def __init__(self, run_id: str, folder=None, home=None):
         self.run_id, self.folder = run_id, folder or state_directory()
         self.process = None
         self.next_start = 0.0
@@ -186,7 +186,10 @@ class Companion:
         self.closing = False
         self.frontend_started = 0.0
         self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="local-activity")
-        self.activity = ActivityService()
+        self.activity = ActivityService(home)
+        self.metadata_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="request-metadata")
+        self.metadata_pending = None
+        self.next_metadata = 0.0
         self.pending = None
         self.next_activity = 0.0
         self.next_titles = 0.0
@@ -195,6 +198,15 @@ class Companion:
         now = time.monotonic()
         if self.closing:
             return False
+        if self.metadata_pending is not None and self.metadata_pending.done():
+            try:
+                self.metadata_pending.result()
+            except Exception as error:
+                record('request_metadata_read_failed', error, folder=self.folder)
+            self.metadata_pending = None
+        if self.metadata_pending is None and now >= self.next_metadata:
+            self.metadata_pending = self.metadata_pool.submit(self.activity.service.request_metadata.capture)
+            self.next_metadata = now + 2
         if self.process is not None and self.process.poll() is None:
             heartbeat = read_json(self.folder / 'frontend.json')
             fresh = (heartbeat.get('run_id') == self.run_id and heartbeat.get('pid') == self.process.pid
@@ -256,3 +268,4 @@ class Companion:
             except (OSError, subprocess.TimeoutExpired):
                 pass
         self.pool.shutdown(wait=False, cancel_futures=True)
+        self.metadata_pool.shutdown(wait=False, cancel_futures=True)

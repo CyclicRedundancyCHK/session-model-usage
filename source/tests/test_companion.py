@@ -190,9 +190,34 @@ class ActivityTests(unittest.TestCase):
 
 
 class BridgeLifecycleTests(unittest.TestCase):
+    def test_metadata_capture_runs_without_current_chat_or_fresh_frontend(self):
+        with tempfile.TemporaryDirectory() as folder:
+            companion = Companion('run', Path(folder), home=Path(folder))
+            companion.next_activity = float('inf')
+            companion.process = Mock(pid=123)
+            companion.process.poll.return_value = None
+            try:
+                with patch.object(companion.activity.service.request_metadata, 'capture', return_value={'status':'complete'}) as capture, \
+                     patch('session_model_usage.companion.read_json',return_value={}):
+                    companion.tick()
+                    companion.metadata_pending.result(timeout=2)
+                    companion.tick()
+                    self.assertEqual(capture.call_count,1)
+            finally:
+                companion.process.poll.return_value = 0
+                companion.close()
+
+    def test_closed_companion_does_not_capture_or_restart_workers(self):
+        with tempfile.TemporaryDirectory() as folder:
+            companion = Companion('run',Path(folder),home=Path(folder))
+            companion.close()
+            with patch.object(companion.activity.service.request_metadata,'capture') as capture:
+                self.assertFalse(companion.tick())
+                capture.assert_not_called()
+
     def test_recent_list_is_published_only_for_a_fresh_frontend(self):
         with tempfile.TemporaryDirectory() as folder:
-            companion = Companion('run', Path(folder))
+            companion = Companion('run', Path(folder), home=Path(folder))
             companion.next_activity = float('inf')
             companion.process = Mock(pid=123)
             companion.process.poll.return_value = None
@@ -222,7 +247,7 @@ class BridgeLifecycleTests(unittest.TestCase):
         self.assertFalse(publish_usage({}, 'run', None))
     def test_companion_restart_never_starts_or_terminates_codex(self):
         with tempfile.TemporaryDirectory() as folder, patch('session_model_usage.companion.frontend_path', return_value=Path(folder)/'missing.exe'):
-            companion = Companion('run', Path(folder))
+            companion = Companion('run', Path(folder), home=Path(folder))
             companion.next_activity = float('inf')
             child = Mock(); child.poll.return_value = 1
             companion.process = child

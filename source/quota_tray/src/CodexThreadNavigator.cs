@@ -11,6 +11,7 @@ namespace CodexQuotaTray
     internal sealed class RecentThreadSnapshot
     {
         internal bool Available;
+        internal DateTimeOffset CapturedAt;
         internal readonly List<TaskNavigationTarget> Targets = new List<TaskNavigationTarget>();
         internal readonly Dictionary<string, object> Titles = new Dictionary<string, object>();
     }
@@ -44,7 +45,10 @@ namespace CodexQuotaTray
             var age = CompanionBridge.Now - CompanionBridge.Number(CompanionBridge.Get(data, "captured_at"));
             if (CompanionBridge.Text(CompanionBridge.Get(data, "run_id")) != runId || age < 0 || age >= 30 ||
                 CompanionBridge.Text(CompanionBridge.Get(data, "status")) != "complete") return result;
+            if (!(CompanionBridge.Get(data, "threads") is object[])) return result;
             result.Available = true;
+            result.CapturedAt = new DateTimeOffset(1970, 1, 1, 0, 0, 0, TimeSpan.Zero)
+                .AddSeconds(CompanionBridge.Number(CompanionBridge.Get(data, "captured_at")));
             foreach (var row in CompanionBridge.Rows(CompanionBridge.Get(data, "threads")).Take(128))
             {
                 var id = CompanionBridge.Text(CompanionBridge.Get(row, "thread_id"));
@@ -53,6 +57,8 @@ namespace CodexQuotaTray
                 result.Titles[id] = CompanionBridge.Text(CompanionBridge.Get(row, "title"));
                 if (result.Targets.Count == 6) break;
             }
+            if (result.Targets.Count == 0 && ((object[])CompanionBridge.Get(data, "threads")).Length > 0)
+                result.Available = false;
             return result;
         }
 
