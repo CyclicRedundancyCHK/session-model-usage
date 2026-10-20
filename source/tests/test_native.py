@@ -26,6 +26,13 @@ def route(path=None, window=1, stamp='2026-01-01T00:00:02.000Z'):
             f'conversationId=client-new-thread:ignored ownerRoutePath={path or "/local/"+FIRST} windowId={window}\n')
 
 
+def renderer(appearance='primary', window=1, contents=1, stamp='2026-01-01T00:00:03.000Z'):
+    return (f'{stamp} error [electron-message-handler] Request failed '
+            'error={"code":-32003,"message":"fixture"} '
+            f'rendererWebContentsId={contents} rendererWindowAppearance={appearance} '
+            f'rendererWindowFocused=true rendererWindowId={window} rendererWindowVisible=true\n')
+
+
 class RoutesTests(unittest.TestCase):
     def test_only_explicit_window_route_identifies_thread(self):
         r=Routes(1,CREATED,[]); r.consume(loaded())
@@ -64,6 +71,83 @@ class RoutesTests(unittest.TestCase):
     def test_route_without_verified_appearance_is_not_used(self):
         r=Routes(1,CREATED,[]);r.consume(route())
         self.assertIsNone(r.for_appearance('primary'))
+    def test_renderer_metadata_recovers_identity_after_startup_logs_rotate(self):
+        r=Routes(1,CREATED,[]);r.consume(route());r.consume(renderer())
+        self.assertEqual(r.for_appearance('primary')['route'],'/local/'+FIRST)
+        self.assertEqual(r.appearances[1][1],'primary')
+    def test_renderer_identity_without_explicit_route_is_not_a_conversation(self):
+        r=Routes(1,CREATED,[]);r.consume(renderer())
+        self.assertIsNone(r.for_appearance('primary'))
+    def test_renderer_request_completed_uses_the_same_verified_metadata(self):
+        r=Routes(1,CREATED,[]);r.consume(route())
+        r.consume(renderer().replace('error [','debug [').replace('Request failed','Request completed'))
+        self.assertEqual(r.for_appearance('primary')['route'],'/local/'+FIRST)
+    def test_untrusted_or_incomplete_renderer_metadata_cannot_supply_identity(self):
+        valid=renderer()
+        invalid=[valid.replace('[electron-message-handler]','[other]'),
+                 valid.replace('Request failed','quoted Request failed'),
+                 valid.replace('Request failed','Request failed extra text'),
+                 valid.replace('rendererWindowId=1','rendererWindowId=null'),
+                 valid.replace('rendererWindowId=1','rendererWindowId=0'),
+                 valid.replace('rendererWindowId=1','rendererWindowId='+'9'*5000),
+                 valid.replace('rendererWebContentsId=1','rendererWebContentsId=bad'),
+                 valid.replace('rendererWebContentsId=1','rendererWebContentsId=0'),
+                 valid.replace('rendererWindowAppearance=primary','rendererWindowAppearance=unknown'),
+                 valid.replace('rendererWindowAppearance=primary','rendererWindowAppearance=null'),
+                 valid.replace('rendererWindowFocused=true ',''),
+                 valid.replace('rendererWindowVisible=true','rendererWindowVisible=null'),
+                 valid.replace('rendererWindowId=1','rendererWindowId=1 rendererWindowId=2')]
+        for line in invalid:
+            with self.subTest(line=line):
+                r=Routes(1,CREATED,[]);r.consume(route());r.consume(line)
+                self.assertFalse(r.appearances)
+                self.assertIsNone(r.for_appearance('primary'))
+    def test_quoted_json_renderer_fields_are_not_identity(self):
+        forged='rendererWebContentsId=9 rendererWindowAppearance=detached rendererWindowFocused=true rendererWindowId=9 rendererWindowVisible=true'
+        line=renderer().replace('"fixture"','"'+forged+'"')
+        r=Routes(1,CREATED,[]);r.consume(route());r.consume(line)
+        self.assertEqual(set(r.appearances),{1})
+        self.assertEqual(r.appearances[1][1],'primary')
+        quoted=line[:line.index(' rendererWebContentsId=1')]
+        r=Routes(1,CREATED,[]);r.consume(route());r.consume(quoted)
+        self.assertFalse(r.appearances)
+    def test_renderer_reports_keep_incarnation_stable_and_respect_later_load(self):
+        r=Routes(1,CREATED,[]);r.consume(renderer())
+        first=r.appearances[1]
+        r.consume(renderer(stamp='2026-01-01T00:00:04.000Z'))
+        self.assertEqual(r.appearances[1],first)
+        r.consume(loaded('detached',stamp='2026-01-01T00:00:06.000Z'))
+        later=r.appearances[1]
+        r.consume(renderer(stamp='2026-01-01T00:00:05.000Z'))
+        self.assertEqual(r.appearances[1],later)
+        r.consume(renderer(stamp='2026-01-01T00:00:04.500Z'))
+        self.assertEqual(r.appearances[1],later)
+    def test_old_process_renderer_metadata_is_rejected(self):
+        r=Routes(1,CREATED+5,[]);r.consume(renderer())
+        self.assertFalse(r.appearances);self.assertFalse(r.renderer_identities)
+    def test_renderer_identity_half_line_waits_for_completion(self):
+        with tempfile.TemporaryDirectory() as d:
+            f=Path(d)/'route.log';f.write_text(route()+renderer()[:-1])
+            r=Routes(101,CREATED,[]);r.files[f]={'offset':0,'pending':b''};r.refresh()
+            self.assertFalse(r.caught_up);self.assertFalse(r.appearances)
+            with f.open('ab') as out:out.write(b'\n')
+            r.refresh();self.assertTrue(r.caught_up)
+            self.assertEqual(r.for_appearance('primary')['route'],'/local/'+FIRST)
+    def test_renderer_identity_survives_read_chunk_boundary(self):
+        with tempfile.TemporaryDirectory() as d:
+            f=Path(d)/'route.log';prefix=route().encode()
+            padding=b'x'*(4*1024*1024-len(prefix)-32)+b'\n'
+            f.write_bytes(prefix+padding+renderer().encode())
+            r=Routes(101,CREATED,[]);r.files[f]={'offset':0,'pending':b''};r.refresh()
+            self.assertFalse(r.caught_up);self.assertFalse(r.appearances)
+            r.refresh();self.assertTrue(r.caught_up)
+            self.assertEqual(r.for_appearance('primary')['route'],'/local/'+FIRST)
+    def test_different_pid_renderer_metadata_cannot_supply_identity(self):
+        with tempfile.TemporaryDirectory() as d:
+            p=Path(d)/'2026/01/01';p.mkdir(parents=True)
+            (p/'codex-desktop-test-102-t0-i1-0.log').write_text(route()+renderer())
+            r=Routes(101,CREATED,[Path(d)]);r.refresh()
+            self.assertFalse(r.appearances);self.assertFalse(r.caught_up)
     def test_primary_and_avatar_routes_stay_separate(self):
         r=Routes(1,CREATED,[]);r.consume(loaded());r.consume(route())
         r.consume(loaded('avatarOverlay',2));r.consume(route('/dots/'+SECOND,2))
@@ -189,6 +273,18 @@ class NativeObservationTests(unittest.TestCase):
     def test_start_after_codex_reads_existing_explicit_route(self):
         views=self.n.observe();self.assertEqual(views[0].data['threadId'],FIRST)
         self.assertEqual(views[0].data['nativeHwnd'],101)
+    def test_cold_worker_recovers_from_rotated_logs_and_ignores_auxiliary_window(self):
+        self.r.appearances.clear();self.r.consume(renderer())
+        self.reader.read.side_effect=[None,self.view]
+        with patch('session_model_usage.native.visible_app_windows',return_value=[
+                {**self.window,'hwnd':102},self.window]):
+            views=self.n.observe()
+        self.assertEqual([(v.data['nativeHwnd'],v.data['threadId']) for v in views],[(101,FIRST)])
+        self.assertEqual(self.n.problem_code,'supported')
+    def test_missing_identity_is_distinct_from_ambiguous_windows(self):
+        self.r.appearances.clear()
+        self.assertFalse(self.n.observe())
+        self.assertEqual(self.n.problem_code,'window_identity_unavailable')
     def test_micro_draft_attaches_without_selected_sidebar_row_or_thread_id(self):
         self.r.consume(route('/local/client-new-thread:'+SECOND,stamp='2026-01-01T00:00:03.000Z'))
         self.view.update(selection=(),selection_required=True)
@@ -303,6 +399,30 @@ class NativeObservationTests(unittest.TestCase):
             views=self.n.observe()
         self.assertEqual([(v.data['nativeHwnd'],v.data['threadId']) for v in views],
                          [(101,FIRST),(102,SECOND)])
+    def test_repeated_renderer_metadata_keeps_confirmed_multiwindow_binding(self):
+        self.r.appearances.clear();self.r.consume(renderer())
+        self.n.observe()
+        self.r.consume(route('/local/'+SECOND,window=3))
+        self.r.consume(renderer(window=3,contents=3))
+        second={**self.view,'selection_required':False,'selection':()}
+        windows=[self.window,{**self.window,'hwnd':102}]
+        with patch('session_model_usage.native.visible_app_windows',return_value=windows):
+            self.reader.read.side_effect=[self.view,second]
+            self.n.observe()
+            before=dict(self.n.window_routes)
+            self.r.consume(renderer(stamp='2026-01-01T00:00:04.000Z'))
+            self.r.consume(renderer(window=3,contents=3,stamp='2026-01-01T00:00:04.000Z'))
+            self.reader.read.side_effect=[self.view,second]
+            views=self.n.observe()
+        self.assertEqual(self.n.window_routes,before)
+        self.assertEqual([(v.data['nativeHwnd'],v.data['threadId']) for v in views],
+                         [(101,FIRST),(102,SECOND)])
+    def test_renderer_webcontents_replacement_drops_old_cached_binding(self):
+        self.r.appearances.clear();self.r.consume(renderer())
+        self.n.observe()
+        self.r.consume(route('/local/'+SECOND,window=3));self.r.consume(renderer(window=3,contents=3))
+        self.r.consume(renderer(contents=4,stamp='2026-01-01T00:00:04.000Z'))
+        self.assertFalse(self.n.observe())
     def test_micro_second_primary_switches_and_survives_main_minimizing(self):
         self.n.observe(); self.r.consume(loaded(window=3)); self.r.consume(route('/local/'+SECOND,window=3))
         second={**self.view,'selection_required':False,'selection':()}

@@ -38,7 +38,13 @@ namespace CodexQuotaTray
             public bool Unread;
             public bool Completed;
             public string LastTerminalTurn;
-            public readonly HashSet<string> Questions = new HashSet<string>();
+            public DateTimeOffset QuestionBoundary;
+            public readonly Dictionary<string, DateTimeOffset> Questions = new Dictionary<string, DateTimeOffset>();
+            // Desktop question request IDs and tool call IDs are separate namespaces.
+            // Notifications mirror the session's questions; they are not additional tool calls.
+            public readonly Dictionary<string, DateTimeOffset> QuestionNotifications = new Dictionary<string, DateTimeOffset>();
+            public readonly HashSet<string> ResolvedQuestionNotifications = new HashSet<string>();
+            public readonly Queue<string> ResolvedQuestionNotificationOrder = new Queue<string>();
         }
         private sealed class ObservedLine
         {
@@ -221,7 +227,9 @@ namespace CodexQuotaTray
                 { confirmed = ReadSessionId(path); if (confirmed != null) _sessionIds[path] = confirmed; }
                 if (!string.Equals(id, confirmed, StringComparison.OrdinalIgnoreCase)) return;
             }
-            if (line.Contains("[desktop-notifications] received question") || line.Contains("[desktop-notifications] received approval") ||
+            if (line.Contains("[desktop-notifications] received question"))
+                Update(id, CodexTaskState.Ask, stamp, null, Value(line, "requestId="), true);
+            else if (line.Contains("[desktop-notifications] received approval") ||
                 line.Contains("[desktop-notifications] suppressed approval") || line.Contains("[desktop-notifications] show permission") ||
                 (line.Contains("[desktop-notifications] show notification") && Value(line, "kind=") == "permission"))
                 Update(id, CodexTaskState.Ask, stamp, null, Value(line, "requestId="));
@@ -274,40 +282,72 @@ namespace CodexQuotaTray
             {
                 var output = CompanionBridge.Parse(CompanionBridge.Text(CompanionBridge.Get(payload, "output")) ?? "");
                 var answers = CompanionBridge.Get(output, "answers");
-                if (answers is Dictionary<string, object> || answers is object[])
-                    Resume(id, stamp, CompanionBridge.Text(CompanionBridge.Get(payload, "call_id")));
+                var call = CompanionBridge.Text(CompanionBridge.Get(payload, "call_id"));
+                if (!string.IsNullOrEmpty(call) && (answers is Dictionary<string, object> || answers is object[]))
+                    Resume(id, stamp, call);
             }
         }
 
         private void Resume(string id, DateTimeOffset stamp, string question)
         {
-            TaskEntry task;
-            if (_tasks.TryGetValue(id, out task) && task.State == CodexTaskState.Ask && stamp >= task.Updated &&
-                (question == null || task.Questions.Contains(question)))
+            TaskEntry task; DateTimeOffset asked;
+            if (_tasks.TryGetValue(id, out task) && task.State == CodexTaskState.Ask &&
+                (question == null ? stamp >= task.Updated :
+                    task.Questions.TryGetValue(question, out asked) && stamp >= asked ||
+                    task.QuestionNotifications.TryGetValue(question, out asked) && stamp >= asked))
             {
-                if (question == null) task.Questions.Clear(); else task.Questions.Remove(question);
-                task.Updated = stamp;
-                if (task.Questions.Count == 0) task.State = task.Running ? CodexTaskState.Working :
+                if (question == null) { task.Questions.Clear(); task.QuestionBoundary = stamp; }
+                else task.Questions.Remove(question);
+                ClearQuestionNotifications(task, stamp);
+                if (stamp > task.Updated) task.Updated = stamp;
+                if (task.Questions.Count == 0 && task.QuestionNotifications.Count == 0) task.State = task.Running ? CodexTaskState.Working :
                     task.Completed && task.Unread ? CodexTaskState.Finish : CodexTaskState.None;
             }
         }
 
-        private void Update(string id, CodexTaskState state, DateTimeOffset stamp, string turn, string question)
+        private static void ClearQuestionNotifications(TaskEntry task, DateTimeOffset? through = null)
+        {
+            foreach (var request in task.QuestionNotifications.Where(p => !through.HasValue || p.Value <= through.Value).Select(p => p.Key).ToList())
+            {
+                task.QuestionNotifications.Remove(request);
+                if (request.Length > 0 && task.ResolvedQuestionNotifications.Add(request))
+                    task.ResolvedQuestionNotificationOrder.Enqueue(request);
+            }
+            // Keep recent IDs so a duplicate notification from another window cannot reopen Ask.
+            while (task.ResolvedQuestionNotificationOrder.Count > 128)
+                task.ResolvedQuestionNotifications.Remove(task.ResolvedQuestionNotificationOrder.Dequeue());
+        }
+
+        private void Update(string id, CodexTaskState state, DateTimeOffset stamp, string turn, string question, bool questionNotification = false)
         {
             if (string.IsNullOrEmpty(id) || id.Length > 160 || stamp < _hostStarted || stamp > DateTimeOffset.UtcNow.AddMinutes(2)) return;
             TaskEntry task;
             if (!_tasks.TryGetValue(id, out task)) { task = new TaskEntry(); _tasks[id] = task; }
-            if (stamp < task.Updated) return;
+            if (questionNotification && question != null && task.ResolvedQuestionNotifications.Contains(question)) return;
+            if (stamp < task.Updated)
+            {
+                // The desktop can flush a question before its earlier local call reaches the next poll.
+                // Register that call without rolling back the latest state or reviving a previous turn.
+                if (state == CodexTaskState.Ask && !questionNotification && question != null &&
+                    task.State == CodexTaskState.Ask && stamp >= task.QuestionBoundary)
+                    task.Questions[question] = stamp;
+                return;
+            }
             if (state != CodexTaskState.Working && state != CodexTaskState.Ask && turn != null && task.Turn != null && task.Running && turn != task.Turn) return;
             if (state == CodexTaskState.Working)
             {
                 // Metadata for the same running turn must not consume a pending question.
                 if (task.State == CodexTaskState.Ask && (turn == null || turn == task.Turn)) return;
                 task.Running = true; task.Questions.Clear(); task.Unread = false; task.Completed = false;
+                ClearQuestionNotifications(task);
+                task.QuestionBoundary = stamp;
                 if (turn == null) task.Turn = null;
             }
             else if (state == CodexTaskState.Ask)
-            { if (question != null) task.Questions.Add(question); }
+            {
+                if (questionNotification) task.QuestionNotifications[question ?? ""] = stamp;
+                else if (question != null) task.Questions[question] = stamp;
+            }
             else
             {
                 if (state == CodexTaskState.Finish && turn != null && turn == task.LastTerminalTurn) return;
@@ -316,6 +356,8 @@ namespace CodexQuotaTray
                 // A historical question call is not evidence of a currently pending request.
                 // Completion, cancellation and failure all close questions from this turn.
                 task.Questions.Clear();
+                ClearQuestionNotifications(task);
+                task.QuestionBoundary = stamp;
                 task.Completed = state == CodexTaskState.Finish;
                 if (changed) task.Unread = !_bootstrapping && stamp >= _startedObserving;
                 if (turn != null) task.LastTerminalTurn = turn;

@@ -51,9 +51,9 @@ internal static class IntegrationTests
         state["attachment_id"] = "different";
         Assert(!CompanionBridge.ParseSession(state, envelope, "test", 101).Total.HasValue, "attachment isolation");
         Assert(CompanionBridge.Parse("bad") == null, "malformed IPC");
-        var update = "{\"tag_name\":\"v0.2.5\",\"html_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.5\",\"assets\":[{\"name\":\"session-model-usage-v0.2.5-windows-x64.zip\",\"browser_download_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/download/v0.2.5/session-model-usage-v0.2.5-windows-x64.zip\"}]}";
+        var update = "{\"tag_name\":\"v0.2.6\",\"html_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/tag/v0.2.6\",\"assets\":[{\"name\":\"session-model-usage-v0.2.6-windows-x64.zip\",\"browser_download_url\":\"https://github.com/CyclicRedundancyCHK/session-model-usage/releases/download/v0.2.6/session-model-usage-v0.2.6-windows-x64.zip\"}]}";
         Assert(CombinedUpdateService.Parse(update).Newer, "complete combined update accepted");
-        Assert(!CombinedUpdateService.Parse(update.Replace("v0.2.5", "v0.2.4")).Newer, "current version is up to date");
+        Assert(!CombinedUpdateService.Parse(update.Replace("v0.2.6", "v0.2.5")).Newer, "current version is up to date");
         Assert(!CombinedUpdateService.Parse(update.Replace("CyclicRedundancyCHK/session-model-usage", "SYD-Official/CodexQuotaTray")).Newer, "upstream quota-only update rejected");
         Assert(!CombinedUpdateService.Parse(update.Replace(".zip", ".exe")).Newer, "quota-only executable rejected");
         Assert(!CombinedUpdateService.Parse(update.Replace("\"tag_name\"", "\"draft\":true,\"tag_name\"")).Newer, "draft rejected");
@@ -64,6 +64,7 @@ internal static class IntegrationTests
         VerifyQuotaVisibilitySetting();
         VerifyWeeklyActivityConsumption();
         VerifyTaskStates();
+        VerifyQuestionNotificationReplies();
         VerifyTaskNavigation();
         VerifyRecentNavigation();
         VerifyFinishEviction();
@@ -859,6 +860,105 @@ internal static class IntegrationTests
             form.ApplyResult(null);
             Assert(BucketTokens(ActivityBuckets(form, now)) == 0, "startup without a result produces an empty chart safely");
         }
+    }
+
+    private static string InputToolLine(DateTimeOffset stamp, string call, string output = null, bool asynchronous = false)
+    {
+        var payload = new Dictionary<string, object> { { "type", output == null ? "function_call" : "function_call_output" }, { "call_id", call } };
+        if (output == null) payload["name"] = asynchronous ? "request_user_input_async" : "request_user_input";
+        else payload["output"] = output;
+        return new JavaScriptSerializer().Serialize(new { timestamp = stamp.ToString("o"), type = "response_item", payload = payload });
+    }
+
+    private static void VerifyQuestionNotificationReplies()
+    {
+        var now = DateTimeOffset.UtcNow.AddSeconds(-20);
+        var monitor = new CodexTaskMonitor(null, null);
+        monitor.ProcessSessionLine("input", EventLine(now, "task_started", ",\"turn_id\":\"input-turn\""));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(1), "call-one"));
+        var notification = " info [desktop-notifications] received question conversationId=input requestId=55";
+        monitor.ProcessDesktopLine(now.AddSeconds(1).AddMilliseconds(23).ToString("o") + notification);
+        monitor.ProcessDesktopLine(now.AddSeconds(1).AddMilliseconds(40).ToString("o") + notification);
+        Assert(monitor.Snapshot().AskCount == 1, "one question mirrored by multiple windows produces one asking conversation");
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(2), "call-one", "{\"answers\":{\"choice\":\"yes\"}}"));
+        Assert(monitor.Snapshot().AskCount == 0 && monitor.Snapshot().WorkingCount == 1, "a tool answer clears the desktop question with a different numeric request ID before turn completion");
+        monitor.ProcessDesktopLine(now.AddSeconds(3).ToString("o") + notification);
+        Assert(monitor.Snapshot().State == CodexTaskState.Working, "a delayed duplicate window notification cannot reopen an answered question");
+
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(4), "call-two", null, true));
+        monitor.ProcessDesktopLine(now.AddSeconds(4).AddMilliseconds(23).ToString("o") + notification.Replace("55", "56"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(5), "call-two", "{\"accepted\":true}"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(6), "unrelated", "{\"answers\":{}}"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(6), null, "{\"answers\":{}}"));
+        Assert(monitor.Snapshot().State == CodexTaskState.Ask, "acceptance and unrelated or unidentified answers leave a mirrored async question pending");
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(7), "call-three"));
+        monitor.ProcessDesktopLine(now.AddSeconds(7).AddMilliseconds(23).ToString("o") + notification.Replace("55", "57"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(8), "call-two", "{\"answers\":{}}"));
+        Assert(monitor.Snapshot().State == CodexTaskState.Ask, "answering one tool request preserves another pending tool question");
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(9), "call-three", "{\"answers\":{}}"));
+        Assert(monitor.Snapshot().State == CodexTaskState.Working, "answering the remaining request clears all question notification mirrors");
+
+        monitor.ProcessDesktopLine(now.AddSeconds(10).ToString("o") + " info [desktop-notifications] received approval conversationId=input requestId=approval");
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(11), "call-four"));
+        monitor.ProcessDesktopLine(now.AddSeconds(11).AddMilliseconds(23).ToString("o") + notification.Replace("55", "58"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(12), "call-four", "{\"answers\":{}}"));
+        Assert(monitor.Snapshot().State == CodexTaskState.Ask, "an input answer does not clear a separate pending approval");
+        monitor.ProcessSessionLine("other", EventLine(now.AddSeconds(12), "request_user_input", ",\"call_id\":\"other-question\""));
+        monitor.ProcessSessionLine("input", "{\"timestamp\":\"" + now.AddSeconds(13).ToString("o") + "\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[]}}");
+        Assert(monitor.Snapshot().AskCount == 1 && monitor.Snapshot().Targets.Single(t => t.ThreadId == "input").State == CodexTaskState.Working,
+            "a user reply clears only its own conversation's pending requests");
+
+        monitor = new CodexTaskMonitor(null, null);
+        monitor.ProcessSessionLine("input", EventLine(now, "task_started", ",\"turn_id\":\"delayed-source\""));
+        monitor.ProcessDesktopLine(now.AddSeconds(1).AddMilliseconds(23).ToString("o") + notification);
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(1), "delayed-call"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(2), "delayed-call", "{\"answers\":{}}"));
+        Assert(monitor.Snapshot().State == CodexTaskState.Working, "a local request discovered after its newer desktop notification still matches its answer");
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(3), "older-call"));
+        monitor.ProcessDesktopLine(now.AddSeconds(3).AddMilliseconds(23).ToString("o") + notification.Replace("55", "56"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(5), "newer-call"));
+        monitor.ProcessDesktopLine(now.AddSeconds(5).AddMilliseconds(23).ToString("o") + notification.Replace("55", "57"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(4), "older-call", "{\"answers\":{}}"));
+        Assert(monitor.Snapshot().State == CodexTaskState.Ask, "an older answer arriving late preserves the newer pending question");
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(6), "newer-call", "{\"answers\":{}}"));
+        Assert(monitor.Snapshot().State == CodexTaskState.Working, "the newer answer also clears the previously resolved request despite source delivery order");
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(7), "previous-call"));
+        monitor.ProcessDesktopLine(now.AddSeconds(7).AddMilliseconds(23).ToString("o") + notification.Replace("55", "58"));
+        monitor.ProcessDesktopLine(now.AddSeconds(9).AddMilliseconds(23).ToString("o") + notification.Replace("55", "59"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(8), "previous-call", "{\"answers\":{}}"));
+        Assert(monitor.Snapshot().State == CodexTaskState.Ask, "a late answer cannot remove a newer desktop question whose local call is not yet available");
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(9), "desktop-first-call"));
+        monitor.ProcessSessionLine("input", InputToolLine(now.AddSeconds(10), "desktop-first-call", "{\"answers\":{}}"));
+        Assert(monitor.Snapshot().State == CodexTaskState.Working, "the newer desktop-only question clears once its delayed local call and answer arrive");
+
+        var folder = Path.Combine(CompanionPaths.Root, "question-mirror-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        var file = Path.Combine(folder, "desktop-321-question.log");
+        var localId = "00000000-0000-0000-0000-000000000035";
+        var localFile = Path.Combine(folder, "rollout-" + localId + ".jsonl");
+        try
+        {
+            File.WriteAllText(localFile, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"" + localId + "\"}}\n" +
+                EventLine(now, "task_started", ",\"turn_id\":\"poll-turn\"") + "\n" + InputToolLine(now.AddSeconds(1), "call-poll") + "\n", Encoding.UTF8);
+            File.WriteAllText(file, now.AddSeconds(1).AddMilliseconds(23).ToString("o") + notification.Replace("input", localId) + "\n", Encoding.UTF8);
+            monitor = new CodexTaskMonitor(folder, folder);
+            Assert(monitor.Poll(true, 321, now.AddHours(-1)).State == CodexTaskState.Ask, "startup reads a pending question from both desktop and session sources");
+            File.AppendAllText(localFile, InputToolLine(now.AddSeconds(2), "call-poll", "{\"answers\":{}}") + "\n", Encoding.UTF8);
+            Assert(monitor.Poll(true, 321, now.AddHours(-1)).State == CodexTaskState.Working, "incremental polling clears mirrored Ask immediately when the answer is appended");
+            File.AppendAllText(file, now.AddSeconds(3).ToString("o") + notification.Replace("input", localId) + "\n", Encoding.UTF8);
+            Assert(monitor.Poll(true, 321, now.AddHours(-1)).State == CodexTaskState.Working, "incremental polling rejects a duplicate resolved question from another window");
+            monitor = new CodexTaskMonitor(folder, folder);
+            Assert(monitor.Poll(true, 321, now.AddHours(-1)).State == CodexTaskState.Working, "startup replay of an answered question does not recover stale Ask");
+            File.WriteAllText(localFile, "{\"type\":\"session_meta\",\"payload\":{\"id\":\"" + localId + "\"}}\n" +
+                EventLine(now, "task_started", ",\"turn_id\":\"poll-turn\"") + "\n", Encoding.UTF8);
+            File.WriteAllText(file, now.AddSeconds(1).AddMilliseconds(23).ToString("o") + notification.Replace("input", localId) + "\n", Encoding.UTF8);
+            monitor = new CodexTaskMonitor(folder, folder);
+            Assert(monitor.Poll(true, 321, now.AddHours(-1)).State == CodexTaskState.Ask, "desktop-only observation retains the pending question until the local log catches up");
+            File.AppendAllText(localFile, InputToolLine(now.AddSeconds(1), "call-poll") + "\n" +
+                InputToolLine(now.AddSeconds(2), "call-poll", "{\"answers\":{}}") + "\n", Encoding.UTF8);
+            Assert(monitor.Poll(true, 321, now.AddHours(-1)).State == CodexTaskState.Working, "a later poll registers the earlier local call and clears its answered desktop mirror");
+        }
+        finally { File.Delete(file); File.Delete(localFile); Directory.Delete(folder); }
     }
 
     private static void VerifyQuotaVisibilitySetting()

@@ -36,7 +36,8 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication,QWidget
 app=QApplication([]); app.setQuitOnLastWindowClosed(False)
 window=QWidget(); window.setWindowTitle('Session usage isolated acceptance')
-Path(sys.argv[1]).write_text(str(int(window.winId())))
+marker=Path(sys.argv[1]); ready=marker.with_suffix('.tmp')
+ready.write_text(str(int(window.winId()))); ready.replace(marker)
 QTimer.singleShot(120000,app.quit)
 app.exec()
 '''

@@ -8,6 +8,7 @@ versions/windows that cannot provide this read-only observation.
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
+import json
 import os
 from pathlib import Path
 import re
@@ -26,6 +27,72 @@ FIELD = re.compile(r'(?:^|\s)(ownerRoutePath|windowId|appearance|webContentsId)=
 EVENT = re.compile(r'^\S+\s+info\s+(?:'
                    r'\[electron-message-handler\] IAB_LIFECYCLE received browser sidebar owner sync(?:\s|$)|'
                    r'\[window-manager\] window main frame finished load(?:\s|$))')
+RENDERER_EVENT = re.compile(r'^\S+\s+(?:debug|info|warning|error)\s+'
+                            r'\[electron-message-handler\] Request (?:failed|completed)(?:\s|$)')
+RENDERER_FIELDS = {'rendererWebContentsId', 'rendererWindowId', 'rendererWindowAppearance',
+                   'rendererWindowVisible', 'rendererWindowFocused'}
+LOG_FIELD = re.compile(r'([A-Za-z][A-Za-z0-9]*)=')
+
+
+def event_timestamp(line: str) -> float | None:
+    try:
+        return datetime.fromisoformat(line.split(' ', 1)[0].replace('Z', '+00:00')).timestamp()
+    except (ValueError, IndexError):
+        return None
+
+
+def renderer_identity(line: str) -> tuple | None:
+    """Extract only main-process supplied renderer identity, outside JSON values.
+
+    The desktop's log-message handler adds getRendererWindowLogFields(sender)
+    after the renderer's safe fields. Its window ID and appearance come from
+    BrowserWindow.fromWebContents(sender) and the window manager's own map.
+    Limit this fallback to the known request lifecycle messages; quoted error
+    data and unrelated log sources cannot provide window identity.
+    """
+    event = RENDERER_EVENT.match(line)
+    timestamp = event_timestamp(line) if event else None
+    if timestamp is None:
+        return None
+    fields, offset = {}, event.end()
+    decoder = json.JSONDecoder()
+    while offset < len(line):
+        while offset < len(line) and line[offset].isspace():
+            offset += 1
+        if offset == len(line):
+            break
+        field = LOG_FIELD.match(line, offset)
+        if not field:
+            return None
+        key, offset = field[1], field.end()
+        if offset == len(line):
+            return None
+        if line[offset] in '{["':
+            try:
+                _, end = decoder.raw_decode(line, offset)
+            except (ValueError, RecursionError):
+                return None
+        else:
+            end = offset
+            while end < len(line) and not line[end].isspace():
+                end += 1
+        if end < len(line) and not line[end].isspace():
+            return None
+        if key in RENDERER_FIELDS:
+            if key in fields:
+                return None
+            fields[key] = line[offset:end]
+        offset = end
+    if set(fields) != RENDERER_FIELDS:
+        return None
+    if (not re.fullmatch(r'[1-9][0-9]{0,9}', fields['rendererWindowId'])
+            or not re.fullmatch(r'[1-9][0-9]{0,9}', fields['rendererWebContentsId'])
+            or fields['rendererWindowAppearance'] not in ('primary', 'detached')
+            or fields['rendererWindowVisible'] not in ('true', 'false')
+            or fields['rendererWindowFocused'] not in ('true', 'false')):
+        return None
+    return (timestamp, int(fields['rendererWindowId']), int(fields['rendererWebContentsId']),
+            fields['rendererWindowAppearance'])
 
 
 def log_roots(executable: Path) -> list[Path]:
@@ -47,11 +114,16 @@ class Routes:
         self.files = {}
         self.routes = {}
         self.appearances = {}
+        self.renderer_identities = {}
         self.revision = 0
         self.last_scan = 0.0
         self.caught_up = False
 
     def consume(self, line: str) -> None:
+        identity = renderer_identity(line)
+        if identity is not None:
+            self.consume_renderer(identity)
+            return
         # Neither arbitrary thread activity nor resume messages identify a view.
         if not EVENT.match(line):
             return
@@ -59,11 +131,8 @@ class Routes:
         window_event = '[window-manager] window main frame finished load' in line
         if not route_event and not window_event:
             return
-        try:
-            timestamp = datetime.fromisoformat(line.split(' ', 1)[0].replace('Z', '+00:00')).timestamp()
-        except (ValueError, IndexError):
-            return
-        if timestamp < self.created:
+        timestamp = event_timestamp(line)
+        if timestamp is None or timestamp < self.created:
             return
         fields = dict(FIELD.findall(line))
         if not fields.get('windowId', '').isdigit():
@@ -82,6 +151,22 @@ class Routes:
             self.revision += 1
             self.routes[key] = {'route': route, 'time': timestamp, 'revision': self.revision}
 
+    def consume_renderer(self, identity: tuple) -> None:
+        timestamp, key, contents, appearance = identity
+        if timestamp < self.created:
+            return
+        previous = self.renderer_identities.get(key)
+        if previous is not None and timestamp < previous[0]:
+            return
+        self.renderer_identities[key] = (timestamp, contents, appearance)
+        known = self.appearances.get(key)
+        # Repeated renderer logs are observations of the same window, not a
+        # reload. Keep its incarnation stable so navigation retains the HWND
+        # binding and sidebar baseline. Explicit later loads remain authoritative.
+        changed = previous is not None and (contents, appearance) != previous[1:]
+        if known is None or (timestamp >= known[0] and (appearance != known[1] or changed)):
+            self.appearances[key] = (timestamp, appearance)
+
     def refresh(self) -> None:
         now = time.monotonic()
         if now - self.last_scan >= 1:
@@ -96,14 +181,14 @@ class Routes:
                     day = (start_day + timedelta(days=offset)).strftime('%Y/%m/%d')
                     for path in (root / day).glob(f'codex-desktop-*-{self.pid}-t0-*.log'):
                         self.files.setdefault(path, {'offset': 0, 'pending': b''})
-        lines = []
+        events = []
         self.caught_up = bool(self.files)
         for path, state in list(self.files.items()):
             try:
                 size = path.stat().st_size
                 if size < state['offset']:
                     # Truncation invalidates the evidence, including old views.
-                    self.routes.clear(); self.appearances.clear()
+                    self.routes.clear(); self.appearances.clear(); self.renderer_identities.clear()
                     state.update(offset=0, pending=b'')
                 with path.open('rb') as stream:
                     stream.seek(state['offset'])
@@ -115,22 +200,34 @@ class Routes:
                     self.caught_up = False
                 if len(state['pending']) > 1024 * 1024:
                     state['pending'] = b''
-                # Discard message content before decoding/storing a line.
-                lines.extend(part.decode('utf-8', 'replace') for part in parts
-                             if b'IAB_LIFECYCLE received browser sidebar owner sync' in part
-                             or b'[window-manager] window main frame finished load' in part)
+                for part in parts:
+                    if (b'[electron-message-handler] Request ' in part
+                            and b'rendererWindowAppearance=' in part):
+                        identity = renderer_identity(part.decode('utf-8', 'replace'))
+                        if identity is not None:
+                            # Do not retain request/error data with the event.
+                            events.append((identity[0], '', identity))
+                    elif (b'IAB_LIFECYCLE received browser sidebar owner sync' in part
+                            or b'[window-manager] window main frame finished load' in part):
+                        line = part.decode('utf-8', 'replace')
+                        timestamp = event_timestamp(line)
+                        if timestamp is not None:
+                            events.append((timestamp, line, None))
             except FileNotFoundError:
                 self.files.pop(path, None)
             except OSError:
                 # Do not display stale usage when the source cannot be read.
-                self.routes.clear(); self.appearances.clear()
+                self.routes.clear(); self.appearances.clear(); self.renderer_identities.clear()
                 state.update(offset=0, pending=b'')
                 self.caught_up = False
-        for line in sorted(lines):
-            self.consume(line)
+        for _, line, identity in sorted(events):
+            if identity is not None:
+                self.consume_renderer(identity)
+            else:
+                self.consume(line)
         if not self.files:
             self.caught_up = False
-            self.routes.clear(); self.appearances.clear()
+            self.routes.clear(); self.appearances.clear(); self.renderer_identities.clear()
 
     def for_appearance(self, appearance: str) -> dict | None:
         # New desktop versions also load non-conversation shell windows with
@@ -402,8 +499,12 @@ class NativeInspector:
                 continue
             key = bindings.get(window['hwnd'])
             if key is None:
-                self.problem = '多个同类窗口无法唯一绑定；已隐藏用量以避免串账'
-                self.problem_code = 'ambiguous_windows'
+                if not self.routes.candidates(view['appearance']):
+                    self.problem = '缺少可确认的窗口身份记录，等待当前窗口元数据'
+                    self.problem_code = 'window_identity_unavailable'
+                else:
+                    self.problem = '多个同类窗口无法唯一绑定；已隐藏用量以避免串账'
+                    self.problem_code = 'ambiguous_windows'
                 continue
             route = self.routes.routes.get(key)
             match = THREAD.match(route['route']) if route else None
